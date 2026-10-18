@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from functools import partial
@@ -271,6 +272,36 @@ def _kick_lookup(config, names: list[str]) -> dict[str, Optional[dict]]:
         wanted = name.casefold()
         found[name] = next((c for c in _kick_search(config, name) if c["name"].casefold() == wanted), None)
     return found
+
+
+# --- Channel avatars -----------------------------------------------------
+
+_TWITCH_LOGIN = re.compile(r"^[A-Za-z0-9_]{1,25}$")
+_KICK_SLUG = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_TWITCH_AVATAR = (
+    "query MeTubeChannelAvatar($login: String!) {"
+    " user(login: $login) { profileImageURL(width: 70) } }"
+)
+
+
+def _channel_slug(url: str) -> Optional[str]:
+    path = (urlparse(url or "").path or "").strip("/")
+    return path.split("/", 1)[0] if path else None
+
+
+def channel_avatar_sync(config, url: str) -> Optional[str]:
+    """Profile picture of a Twitch or Kick channel URL; None for other sites or none set."""
+    platform = platform_for_url(url)
+    slug = _channel_slug(url)
+    if platform == "twitch" and slug and _TWITCH_LOGIN.match(slug):
+        data = _twitch_gql(config, {"query": _TWITCH_AVATAR, "variables": {"login": slug.lower()}})
+        user = data.get("user") if isinstance(data, dict) else None
+        return _safe_image_url((user or {}).get("profileImageURL"), "jtvnw.net")
+    if platform == "kick" and slug and _KICK_SLUG.match(slug):
+        response = _kick_api(config, f"v2/channels/{slug.lower()}", {})
+        user = response.get("user") if isinstance(response, dict) else None
+        return _safe_image_url((user or {}).get("profile_pic"), "kick.com")
+    return None
 
 
 _BACKENDS = {

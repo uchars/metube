@@ -26,6 +26,8 @@ export interface SubscriptionRow {
   /** When the running recording's stream was first seen not matching (epoch seconds). */
   live_mismatch_since?: number | null;
   live_recording?: boolean;
+  /** The channel's profile picture; empty when unknown. */
+  avatar_url?: string;
   last_checked: number | null;
   seen_count: number;
   error: string | null;

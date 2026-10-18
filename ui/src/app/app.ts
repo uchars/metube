@@ -638,6 +638,18 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     });
   }
 
+  /** Subscriptions whose avatar image failed to load; they show the initial instead. */
+  failedAvatars = new Set<string>();
+
+  avatarFailed(id: string) {
+    this.failedAvatars.add(id);
+    this.cdr.markForCheck();
+  }
+
+  avatarInitial(name: string | undefined): string {
+    return (name || '?').trim().charAt(0).toLocaleUpperCase() || '?';
+  }
+
   /** Whose category list the picker browses for a subscription URL. */
   categoryPlatform(url: string | null | undefined): CategoryPlatform | null {
     return categoryPlatformForUrl(url);

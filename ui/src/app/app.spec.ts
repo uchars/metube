@@ -755,6 +755,31 @@ describe('App', () => {
     expect(app.liveCategories).toEqual([]);
   });
 
+  it('shows the avatar before the name, or the initial when it is missing or fails', () => {
+    const fixture = TestBed.createComponent(App);
+    const app = fixture.componentInstance;
+    const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
+    const row = (id: string, name: string, avatar_url: string) => ({
+      id, name, url: `https://www.twitch.tv/${name}`, enabled: true, check_interval_minutes: 5,
+      download_type: 'video', codec: 'auto', format: 'any', quality: 'best', folder: '',
+      last_checked: null, seen_count: 0, error: null, kind: 'live', avatar_url,
+    });
+    subs.subscriptions.set('a', row('a', 'alice', 'https://static-cdn.jtvnw.net/a.png'));
+    subs.subscriptions.set('b', row('b', 'bob', ''));
+    subs.subscriptionsChanged.next();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    const avatars = el.querySelectorAll('.sub-avatar');
+    expect(avatars.length).toBe(2);
+    expect((avatars[0] as HTMLImageElement).getAttribute('src')).toBe('https://static-cdn.jtvnw.net/a.png');
+    expect(avatars[1].textContent?.trim()).toBe('B');
+
+    app.avatarFailed('a');
+    fixture.detectChanges();
+    expect(el.querySelectorAll('img.sub-avatar').length).toBe(0);
+    expect(el.querySelectorAll('.sub-avatar-fallback')[0].textContent?.trim()).toBe('A');
+  });
+
   it('saves edited live categories', () => {
     const fixture = TestBed.createComponent(App);
     const app = fixture.componentInstance;

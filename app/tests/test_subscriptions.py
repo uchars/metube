@@ -1967,6 +1967,12 @@ class ProbeLiveChannelTests(unittest.TestCase):
 
 
 class LiveSubscriptionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The avatar lookup is a network call; stub it for every live test.
+        patcher = patch("subscriptions.stream_categories.channel_avatar_sync", return_value=None)
+        self.avatar_lookup = patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def _add_offline_live(self, mgr, **extra):
         not_live = _not_live_error_cls()
         with patch("subscriptions.extract_flat_playlist", side_effect=not_live("offline")), patch.object(
@@ -2183,6 +2189,13 @@ class _LiveQueue(_Queue):
 class LiveRecordingStopTests(unittest.IsolatedAsyncioTestCase):
     URL = "https://www.twitch.tv/someone"
 
+    def setUp(self):
+        # The avatar lookup is a network call; stub it for every live test.
+        patcher = patch("subscriptions.stream_categories.channel_avatar_sync", return_value=None)
+        self.avatar_lookup = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
     def _stream(self, category):
         return {"id": "s1", "title": "t", "categories": [category], "url": self.URL, "uploader": "Someone"}
 
@@ -2304,3 +2317,51 @@ class LiveRecordingStopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mgr.get(sub_id).live_recheck_minutes, 2)
             res = await mgr.update_subscription(sub_id, {"live_stop_after_minutes": -1})
             self.assertEqual(res["status"], "error")
+
+
+class AvatarTests(unittest.IsolatedAsyncioTestCase):
+    def test_feed_avatar_picks_the_youtube_avatar_thumbnail(self):
+        info = {"thumbnails": [
+            {"id": "banner_uncropped", "url": "https://yt3.googleusercontent.com/banner"},
+            {"id": "7", "url": "https://yt3.googleusercontent.com/small-avatar"},
+            {"id": "avatar_uncropped", "url": "https://yt3.googleusercontent.com/avatar"},
+        ]}
+        self.assertEqual(subscriptions._feed_avatar(info), "https://yt3.googleusercontent.com/avatar")
+        evil = {"thumbnails": [{"id": "avatar_uncropped", "url": "https://evil.example/a.jpg"}]}
+        self.assertEqual(subscriptions._feed_avatar(evil), "")
+        self.assertEqual(subscriptions._feed_avatar({}), "")
+
+    async def test_feed_subscription_stores_the_avatar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            info = {"_type": "channel", "title": "Chan", "thumbnails": [
+                {"id": "avatar_uncropped", "url": "https://yt3.googleusercontent.com/avatar"}]}
+            with patch("subscriptions.extract_flat_playlist", return_value=(info, [])), patch(
+                "subscriptions.validate_url", return_value=None
+            ):
+                result = await mgr.add_subscription("https://www.youtube.com/@chan", **_ADD_KWARGS)
+            self.assertEqual(result["subscription"]["avatar_url"], "https://yt3.googleusercontent.com/avatar")
+
+    async def test_live_avatar_is_looked_up_once_a_day_and_failures_are_harmless(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            sub = SubscriptionInfo(id="a", name="A", url="https://www.twitch.tv/a", kind="live")
+            mgr._subs["a"] = sub
+            art = "https://static-cdn.jtvnw.net/jtv_user_pictures/a-70x70.png"
+            with patch("subscriptions.stream_categories.channel_avatar_sync", return_value=art) as lookup, patch(
+                "subscriptions.probe_live_channel", return_value=None
+            ):
+                await mgr.check_now(["a"])
+                await mgr.check_now(["a"])
+            self.assertEqual(lookup.call_count, 1)
+            self.assertEqual(mgr.get("a").avatar_url, art)
+
+            mgr.get("a").avatar_checked = time.time() - 2 * 24 * 3600
+            with patch(
+                "subscriptions.stream_categories.channel_avatar_sync", side_effect=RuntimeError("down")
+            ), patch("subscriptions.probe_live_channel", return_value=None):
+                await mgr.check_now(["a"])
+            # The old picture stays, and the check itself still ran.
+            self.assertEqual(mgr.get("a").avatar_url, art)
+            self.assertFalse(mgr.get("a").live_now)
+            self.assertGreater(mgr.get("a").avatar_checked, time.time() - 60)

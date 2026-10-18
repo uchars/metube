@@ -23,6 +23,7 @@ from typing import Any, Optional
 import yt_dlp
 import yt_dlp.networking.impersonate
 import bg_tasks
+import stream_categories
 from dl_formats import merge_ytdl_option_layers
 from state_store import AtomicJsonStore, read_legacy_shelf
 from url_guard import validate_url, download_proxies
@@ -57,6 +58,25 @@ DEFAULT_LIVE_STOP_AFTER_MINUTES = 10
 DEFAULT_LIVE_RECHECK_MINUTES = 5
 
 _KEEP = object()
+
+# How often a live channel's profile picture is looked up again.
+_AVATAR_REFRESH_SECONDS = 24 * 3600
+_FEED_AVATAR_HOSTS = ("ggpht.com", "googleusercontent.com")
+
+
+def _feed_avatar(info: Any) -> str:
+    """The channel avatar yt-dlp lists among a feed's thumbnails (YouTube), if any."""
+    thumbs = info.get("thumbnails") if isinstance(info, dict) else None
+    candidates = [t for t in thumbs if isinstance(t, dict)] if isinstance(thumbs, list) else []
+    candidates.sort(key=lambda t: 0 if t.get("id") == "avatar_uncropped" else 1)
+    for thumb in candidates:
+        if "avatar" not in str(thumb.get("id") or ""):
+            continue
+        for host in _FEED_AVATAR_HOSTS:
+            url = stream_categories._safe_image_url(thumb.get("url"), host)
+            if url:
+                return url
+    return ""
 _MEDIA_HINT_FIELDS = (
     "duration",
     "timestamp",
@@ -482,6 +502,9 @@ class SubscriptionInfo:
     # The URL of this subscription's current recording in the download queue.
     live_capture_url: str = ""
     live_recording: bool = False
+    # The channel's profile picture, for the table; "" when unknown.
+    avatar_url: str = ""
+    avatar_checked: Optional[float] = None
     last_checked: Optional[float] = None
     seen_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -515,6 +538,7 @@ class SubscriptionInfo:
             "live_recheck_minutes": self.live_recheck_minutes,
             "live_mismatch_since": self.live_mismatch_since,
             "live_recording": self.live_recording,
+            "avatar_url": self.avatar_url,
             "last_checked": self.last_checked,
             "seen_count": len(self.seen_ids),
             "error": self.error,
@@ -558,6 +582,8 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "live_mismatch_since": sub.live_mismatch_since,
         "live_capture_url": sub.live_capture_url,
         "live_recording": sub.live_recording,
+        "avatar_url": sub.avatar_url,
+        "avatar_checked": sub.avatar_checked,
         "last_checked": sub.last_checked,
         "seen_ids": list(sub.seen_ids),
         "error": sub.error,
@@ -1134,6 +1160,7 @@ class SubscriptionManager:
                 live_categories=live_categories_stored,
                 live_stop_after_minutes=stop_after,
                 live_recheck_minutes=recheck,
+                avatar_url=_feed_avatar(info) if kind == KIND_FEED else "",
                 last_checked=last_checked,
                 seen_ids=list(dict.fromkeys(all_ids)),
                 error=None,
@@ -1322,6 +1349,7 @@ class SubscriptionManager:
             self._checks_in_flight.add(sid)
         try:
             if sub.kind == KIND_LIVE:
+                await self._refresh_live_avatar(sub)
                 await self._check_live_inner(sub)
             else:
                 await self._check_one_inner(sub)
@@ -1514,6 +1542,7 @@ class SubscriptionManager:
                 return
             previous = copy.deepcopy(cur)
             cur.seen_ids = merged
+            cur.avatar_url = _feed_avatar(info) or cur.avatar_url
             cur.last_checked = time.time()
             cur.error = "; ".join(list(dict.fromkeys(queue_errors))[:3]) if queue_errors else None
             try:
@@ -1523,6 +1552,35 @@ class SubscriptionManager:
                 raise
             sub = cur
         await self.notifier.subscription_updated(sub)
+
+    async def _refresh_live_avatar(self, sub: SubscriptionInfo) -> None:
+        """Look up a live channel's profile picture, at most once a day.
+
+        Purely cosmetic, so any failure is logged and the check goes on.
+        """
+        now = time.time()
+        if sub.avatar_checked is not None and now - sub.avatar_checked < _AVATAR_REFRESH_SECONDS:
+            return
+        try:
+            avatar = await asyncio.get_running_loop().run_in_executor(
+                None, partial(stream_categories.channel_avatar_sync, self.config, sub.url)
+            )
+        except Exception as exc:
+            log.info("Could not look up the profile picture for %s: %s", sub.name, exc)
+            avatar = None
+        async with self._lock:
+            cur = self._subs.get(sub.id)
+            if not cur:
+                return
+            previous = copy.deepcopy(cur)
+            cur.avatar_checked = now
+            if avatar:
+                cur.avatar_url = avatar
+            try:
+                self._save_locked()
+            except Exception:
+                self._subs[sub.id] = previous
+                raise
 
     def _live_capture_state(self, url: str) -> str:
         state_fn = getattr(self.dqueue, "live_capture_state", None)

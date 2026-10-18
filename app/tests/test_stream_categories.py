@@ -148,6 +148,28 @@ class KickCategoryTests(_CacheReset):
             self.assertEqual(sc.search_categories_sync(_cfg(), "twitch", ""), [])
 
 
+class ChannelAvatarTests(_CacheReset):
+    def test_twitch_avatar(self):
+        art = "https://static-cdn.jtvnw.net/jtv_user_pictures/x-profile_image-70x70.png"
+        with patch("stream_categories._twitch_gql", return_value={"user": {"profileImageURL": art}}) as gql:
+            self.assertEqual(sc.channel_avatar_sync(_cfg(), "https://www.twitch.tv/SomeOne"), art)
+        self.assertEqual(gql.call_args.args[1]["variables"], {"login": "someone"})
+
+    def test_kick_avatar(self):
+        art = "https://files.kick.com/images/user/1/profile_image/a.webp"
+        with patch("stream_categories._kick_api", return_value={"user": {"profile_pic": art}}) as api:
+            self.assertEqual(sc.channel_avatar_sync(_cfg(), "https://kick.com/someone"), art)
+        self.assertEqual(api.call_args.args[1], "v2/channels/someone")
+
+    def test_untrusted_or_unsupported(self):
+        with patch("stream_categories._kick_api", return_value={"user": {"profile_pic": "https://evil.example/a"}}):
+            self.assertIsNone(sc.channel_avatar_sync(_cfg(), "https://kick.com/someone"))
+        with patch("stream_categories._twitch_gql") as gql:
+            self.assertIsNone(sc.channel_avatar_sync(_cfg(), "https://www.twitch.tv/../x"))
+            self.assertIsNone(sc.channel_avatar_sync(_cfg(), "https://www.youtube.com/@x/live"))
+        gql.assert_not_called()
+
+
 class RealYtDlpTests(unittest.TestCase):
     def setUp(self):
         try:

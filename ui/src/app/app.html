@@ -1016,6 +1016,14 @@
                       [disabled]="downloads.loading">Cancel</button>
                   </div>
                 } @else {
+                  <div class="d-flex gap-2 align-items-center">
+                  @if (entry[1].avatar_url && !failedAvatars.has(entry[0])) {
+                    <img class="sub-avatar" [src]="entry[1].avatar_url" alt="" loading="lazy"
+                      referrerpolicy="no-referrer"
+                      (error)="avatarFailed(entry[0])" />
+                  } @else {
+                    <span class="sub-avatar sub-avatar-fallback" aria-hidden="true">{{ avatarInitial(entry[1].name) }}</span>
+                  }
                   <div class="d-flex flex-wrap gap-1 align-items-center">
                     <span class="text-break">{{ entry[1].name }}</span>
                     @if (entry[1].kind === 'live') {
@@ -1028,6 +1036,7 @@
                       (click)="beginEditName(entry[0], entry[1].name)"
                       [disabled]="downloads.loading"
                       ngbTooltip="Rename this subscription (display name only; does not affect the download folder)">Edit</button>
+                  </div>
                   </div>
                 }
               </td>
