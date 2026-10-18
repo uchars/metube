@@ -465,16 +465,13 @@
                       placeholder="Optional regex">
                   </div>
                 </div>
-                <div class="col-md-6">
-                  <div class="input-group">
-                    <span class="input-group-text help-title" ngbPopover="Live channel subscriptions only (subscribe to a Twitch, Kick or YouTube /live channel URL): record a stream only while its category is one of these. Comma-separated, case-insensitive; empty = any category. Combined with the title filter, both must match." triggers="click" autoClose="outside" container="body">Live Stream Categories</span>
-                    <input type="text"
-                      class="form-control"
-                      name="liveCategories"
-                      [(ngModel)]="liveCategories"
-                      [disabled]="addInProgress || subscribeInProgress || downloads.loading"
-                      placeholder="e.g. Just Chatting, Chess">
-                  </div>
+                <div class="col-12">
+                  <span class="form-label d-inline-block mb-1 help-title" tabindex="0" role="button"
+                    ngbPopover="Live channel subscriptions only (subscribe to a Twitch, Kick or YouTube /live channel URL): record a stream only while its category is one of these. Pick from Twitch's categories or add your own name (e.g. for Kick); case-insensitive; none = any category. Combined with the title filter, both must match."
+                    triggers="click" autoClose="outside" container="body">Live Stream Categories</span>
+                  <app-category-picker
+                    [(categories)]="liveCategories"
+                    [disabled]="addInProgress || subscribeInProgress || downloads.loading" />
                 </div>
                 <div class="col-12">
                   <div class="form-check form-switch">
@@ -1038,13 +1035,9 @@
                 @if (entry[1].kind === 'live') {
                   @if (editingLiveCategoriesId === entry[0]) {
                     <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
-                      <input type="text"
-                        class="form-control form-control-sm flex-grow-1"
-                        [name]="'subLiveCategories' + entry[0]"
-                        [(ngModel)]="liveCategoriesEditDraft"
-                        placeholder="Comma-separated categories"
-                        [disabled]="downloads.loading"
-                        [attr.aria-label]="'Live categories for ' + entry[1].name" />
+                      <app-category-picker class="w-100"
+                        [(categories)]="liveCategoriesEditDraft"
+                        [disabled]="downloads.loading" />
                       <button type="button" class="btn btn-sm btn-outline-secondary"
                         (click)="saveLiveCategories(entry[0])"
                         [disabled]="downloads.loading">Save</button>

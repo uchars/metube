@@ -737,16 +737,16 @@ describe('App', () => {
     expect(payload.skipSubscriberOnly).toBe(false);
   });
 
-  it('sends live categories as a trimmed list', () => {
+  it('sends the picked live categories and clears them afterwards', () => {
     const fixture = TestBed.createComponent(App);
     const app = fixture.componentInstance;
     const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
     app.addUrl = 'https://www.twitch.tv/someone';
-    app.liveCategories = ' Chess, Just Chatting ,, ';
+    app.liveCategories = ['Chess', 'Just Chatting'];
     app.addSubscription();
     const payload = subs.subscribeCalls[0] as { liveCategories: string[] };
     expect(payload.liveCategories).toEqual(['Chess', 'Just Chatting']);
-    expect(app.liveCategories).toBe('');
+    expect(app.liveCategories).toEqual([]);
   });
 
   it('saves edited live categories', () => {
@@ -754,8 +754,8 @@ describe('App', () => {
     const app = fixture.componentInstance;
     const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
     app.beginEditLiveCategories('s1', ['Chess']);
-    expect(app.liveCategoriesEditDraft).toBe('Chess');
-    app.liveCategoriesEditDraft = 'Chess, Art';
+    expect(app.liveCategoriesEditDraft).toEqual(['Chess']);
+    app.liveCategoriesEditDraft = ['Chess', 'Art'];
     app.saveLiveCategories('s1');
     expect(subs.updateCalls).toEqual([['s1', { live_categories: ['Chess', 'Art'] }]]);
     expect(app.editingLiveCategoriesId).toBeNull();

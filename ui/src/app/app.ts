@@ -34,6 +34,7 @@ import {
   ItemCheckboxComponent,
   ToastContainerComponent,
   PlaylistBrowserComponent,
+  CategoryPickerComponent,
 } from './components/';
 
 @Component({
@@ -52,6 +53,7 @@ import {
         FileSizePipe,
         SelectAllCheckboxComponent,
         ItemCheckboxComponent,
+        CategoryPickerComponent,
         ToastContainerComponent,
   ],
   templateUrl: './app.html',
@@ -106,12 +108,12 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   subscribeInProgress = false;
   checkIntervalMinutes = 60;
   titleRegex = '';
-  liveCategories = '';
+  liveCategories: string[] = [];
   skipSubscriberOnly = false;
   editingTitleRegexId: string | null = null;
   titleRegexEditDraft = '';
   editingLiveCategoriesId: string | null = null;
-  liveCategoriesEditDraft = '';
+  liveCategoriesEditDraft: string[] = [];
   editingNameId: string | null = null;
   nameEditDraft = '';
   readonly subscriptionNameMaxLength = 200;
@@ -573,7 +575,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         checkIntervalMinutes: this.checkIntervalMinutes,
         titleRegex: tr,
         skipSubscriberOnly: this.skipSubscriberOnly,
-        liveCategories: this.parseLiveCategories(this.liveCategories),
+        liveCategories: [...this.liveCategories],
       })
       .pipe(
         takeUntilDestroyed(this.destroyRef),
@@ -590,7 +592,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
           } else {
             this.addUrl = '';
             this.titleRegex = '';
-            this.liveCategories = '';
+            this.liveCategories = [];
             this.skipSubscriberOnly = false;
           }
         },
@@ -629,29 +631,20 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     });
   }
 
-  /** Splits the comma-separated live categories input into a trimmed list. */
-  parseLiveCategories(value: string): string[] {
-    return (value || '')
-      .split(',')
-      .map((c) => c.trim())
-      .filter((c) => c.length > 0);
-  }
-
   beginEditLiveCategories(id: string, current: string[] | undefined) {
     this.editingLiveCategoriesId = id;
-    this.liveCategoriesEditDraft = (current ?? []).join(', ');
+    this.liveCategoriesEditDraft = [...(current ?? [])];
     this.cdr.markForCheck();
   }
 
   cancelEditLiveCategories() {
     this.editingLiveCategoriesId = null;
-    this.liveCategoriesEditDraft = '';
+    this.liveCategoriesEditDraft = [];
     this.cdr.markForCheck();
   }
 
   saveLiveCategories(id: string) {
-    const categories = this.parseLiveCategories(this.liveCategoriesEditDraft);
-    this.subscriptionsSvc.update(id, { live_categories: categories }).subscribe((res) => {
+    this.subscriptionsSvc.update(id, { live_categories: [...this.liveCategoriesEditDraft] }).subscribe((res) => {
       const error = this.getStatusError(res);
       if (error) {
         this.toasts.error(error || 'Update subscription failed');
