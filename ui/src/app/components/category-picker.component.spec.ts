@@ -145,6 +145,17 @@ describe('CategoryPickerComponent', () => {
     expect(picker.placeholder()).toBe('Type a category name');
   });
 
+  it('removes a category from its chip without opening the panel', () => {
+    const fixture = create(['Chess', 'Art']);
+    const el = fixture.nativeElement as HTMLElement;
+    const button = el.querySelector<HTMLButtonElement>('button[aria-label="Remove Chess"]');
+    expect(button).not.toBeNull();
+    button!.click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.categories()).toEqual(['Art']);
+    expect(fixture.componentInstance.isOpen).toBe(false);
+  });
+
   it('adds and removes categories', () => {
     const fixture = create([]);
     const picker = fixture.componentInstance;

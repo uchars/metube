@@ -71,11 +71,14 @@ interface SearchRequest {
             <span class="text-break">{{ label(name) }}</span>
             <button
               type="button"
-              class="btn-close picker-chip-remove"
+              class="picker-chip-remove"
               [disabled]="disabled()"
               (click)="remove(name)"
               [attr.aria-label]="'Remove ' + name"
-            ></button>
+              [title]="'Remove ' + label(name)"
+            >
+              <fa-icon [icon]="faXmark" />
+            </button>
           </span>
         }
       </div>
@@ -227,10 +230,41 @@ interface SearchRequest {
       object-fit: cover;
       border-radius: 0.2rem;
     }
+    /* The remove button keeps its space so the chips don't shift, but only
+       shows on hover or keyboard focus — and always on touch screens. */
     .picker-chip-remove {
-      width: 0.5em;
-      height: 0.5em;
-      padding: 0.25em;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.1rem;
+      height: 1.1rem;
+      margin-left: -0.1rem;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--bs-secondary-color);
+      font-size: 0.7rem;
+      opacity: 0;
+      transition: opacity 0.12s ease-in-out, background-color 0.12s ease-in-out;
+    }
+    .picker-chip:hover .picker-chip-remove,
+    .picker-chip:focus-within .picker-chip-remove {
+      opacity: 1;
+    }
+    .picker-chip-remove:hover,
+    .picker-chip-remove:focus-visible {
+      background: var(--bs-danger);
+      color: #fff;
+      outline: none;
+    }
+    .picker-chip-remove:disabled {
+      display: none;
+    }
+    @media (hover: none) {
+      .picker-chip-remove {
+        opacity: 1;
+      }
     }
   `,
 })
