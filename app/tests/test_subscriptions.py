@@ -1821,3 +1821,333 @@ class SubscriptionEventLoopTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _not_live_error_cls():
+    """A UserNotLive stand-in that works with both the stub and the real yt_dlp."""
+
+    class _NotLive(subscriptions.yt_dlp.utils.YoutubeDLError):
+        pass
+
+    return _NotLive
+
+
+_ADD_KWARGS = dict(
+    check_interval_minutes=2,
+    download_type="video",
+    codec="auto",
+    format="any",
+    quality="best",
+    folder="",
+    custom_name_prefix="",
+    auto_start=True,
+    playlist_item_limit=0,
+    split_by_chapters=False,
+    chapter_template="",
+    subtitle_language="en",
+    subtitle_mode="prefer_manual",
+)
+
+
+class LiveCategoryValidationTests(unittest.TestCase):
+    def test_accepts_list_and_comma_string(self):
+        self.assertEqual(
+            subscriptions.validate_live_categories(["Just Chatting", " chess ", "Chess", ""]),
+            ["Just Chatting", "chess"],
+        )
+        self.assertEqual(
+            subscriptions.validate_live_categories("Art, Music ,,"), ["Art", "Music"]
+        )
+        self.assertEqual(subscriptions.validate_live_categories(None), [])
+
+    def test_rejects_bad_values(self):
+        with self.assertRaises(ValueError):
+            subscriptions.validate_live_categories([1])
+        with self.assertRaises(ValueError):
+            subscriptions.validate_live_categories({"a": 1})
+        with self.assertRaises(ValueError):
+            subscriptions.validate_live_categories(["x" * 101])
+        with self.assertRaises(ValueError):
+            subscriptions.validate_live_categories([f"c{i}" for i in range(51)])
+
+
+class LiveStreamMatchTests(unittest.TestCase):
+    stream = {"title": "Ranked grind", "categories": ["Chess"]}
+
+    def test_no_filters_match_everything(self):
+        self.assertEqual(subscriptions.live_stream_matches(self.stream, [], None), (True, None))
+
+    def test_category_match_is_case_insensitive_and_any_of(self):
+        self.assertTrue(subscriptions.live_stream_matches(self.stream, ["Art", "chess"], None)[0])
+        self.assertFalse(subscriptions.live_stream_matches(self.stream, ["Art"], None)[0])
+
+    def test_category_and_title_must_both_match(self):
+        import re
+
+        self.assertTrue(
+            subscriptions.live_stream_matches(self.stream, ["Chess"], re.compile("(?i)ranked"))[0]
+        )
+        self.assertFalse(
+            subscriptions.live_stream_matches(self.stream, ["Chess"], re.compile("casual"))[0]
+        )
+
+    def test_category_filter_without_reported_category_explains_why(self):
+        matched, error = subscriptions.live_stream_matches({"title": "x", "categories": []}, ["Chess"], None)
+        self.assertFalse(matched)
+        self.assertEqual(error, subscriptions.NO_CATEGORY_MSG)
+
+
+class ProbeLiveChannelTests(unittest.TestCase):
+    def _fake_ydl(self, result=None, exc=None):
+        class _FakeYDL:
+            def __init__(self, params=None):
+                self.params = params
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def add_info_extractor(self, ie):
+                pass
+
+            def extract_info(self, url, download=False, process=False, ie_key=None):
+                if exc is not None:
+                    raise exc
+                return result
+
+        return _FakeYDL
+
+    def test_returns_stream_details_when_live(self):
+        info = {
+            "id": "stream-1",
+            "title": "Speedrun  attempts",
+            "is_live": True,
+            "categories": ["Celeste"],
+            "webpage_url": "https://kick.com/someone",
+            "uploader": "Someone",
+        }
+        with patch("subscriptions.yt_dlp.YoutubeDL", self._fake_ydl(info), create=True), patch(
+            "subscriptions._twitch_category_ie", return_value=None
+        ):
+            stream = subscriptions.probe_live_channel(_Config(tempfile.gettempdir()), "https://kick.com/someone")
+        self.assertEqual(stream["id"], "stream-1")
+        self.assertEqual(stream["title"], "Speedrun attempts")
+        self.assertEqual(stream["categories"], ["Celeste"])
+        self.assertEqual(stream["url"], "https://kick.com/someone")
+
+    def test_offline_channel_returns_none(self):
+        not_live = _not_live_error_cls()
+        wrapped = subscriptions.yt_dlp.utils.YoutubeDLError("offline")
+        wrapped.exc_info = (not_live, not_live("offline"), None)
+        with patch("subscriptions.yt_dlp.YoutubeDL", self._fake_ydl(exc=wrapped), create=True), patch(
+            "subscriptions._twitch_category_ie", return_value=None
+        ), patch.object(subscriptions.yt_dlp.utils, "UserNotLive", not_live, create=True):
+            self.assertIsNone(
+                subscriptions.probe_live_channel(_Config(tempfile.gettempdir()), "https://twitch.tv/x")
+            )
+
+    def test_other_errors_propagate(self):
+        err = subscriptions.yt_dlp.utils.YoutubeDLError("does not exist")
+        with patch("subscriptions.yt_dlp.YoutubeDL", self._fake_ydl(exc=err), create=True), patch(
+            "subscriptions._twitch_category_ie", return_value=None
+        ):
+            with self.assertRaises(subscriptions.yt_dlp.utils.YoutubeDLError):
+                subscriptions.probe_live_channel(_Config(tempfile.gettempdir()), "https://twitch.tv/x")
+
+    def test_finished_stream_is_not_live(self):
+        info = {"id": "v", "title": "VOD", "live_status": "was_live"}
+        with patch("subscriptions.yt_dlp.YoutubeDL", self._fake_ydl(info), create=True), patch(
+            "subscriptions._twitch_category_ie", return_value=None
+        ):
+            self.assertIsNone(
+                subscriptions.probe_live_channel(_Config(tempfile.gettempdir()), "https://youtube.com/@x/live")
+            )
+
+
+class LiveSubscriptionTests(unittest.IsolatedAsyncioTestCase):
+    async def _add_offline_live(self, mgr, **extra):
+        not_live = _not_live_error_cls()
+        with patch("subscriptions.extract_flat_playlist", side_effect=not_live("offline")), patch.object(
+            subscriptions.yt_dlp.utils, "UserNotLive", not_live, create=True
+        ), patch("subscriptions.validate_url", return_value=None), patch(
+            "subscriptions.probe_live_channel", return_value=None
+        ):
+            result = await mgr.add_subscription("https://www.twitch.tv/someone", **_ADD_KWARGS, **extra)
+            # Let the immediate first check run while the probe is still patched.
+            await asyncio.sleep(0.05)
+        return result
+
+    async def test_offline_live_channel_becomes_live_subscription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            result = await self._add_offline_live(mgr, live_categories="Chess, Art", title_regex="(?i)ranked")
+            self.assertEqual(result["status"], "ok")
+            row = result["subscription"]
+            self.assertEqual(row["kind"], "live")
+            self.assertEqual(row["live_categories"], ["Chess", "Art"])
+            self.assertEqual(row["name"], "someone")
+
+            # Persisted and reloaded as a live subscription.
+            reloaded = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            sub = reloaded.get(row["id"])
+            self.assertEqual(sub.kind, "live")
+            self.assertEqual(sub.live_categories, ["Chess", "Art"])
+
+    async def test_live_video_result_becomes_live_subscription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                return_value=({"_type": "video", "is_live": True, "uploader": "Someone"}, []),
+            ), patch("subscriptions.validate_url", return_value=None), patch(
+                "subscriptions.probe_live_channel", return_value=None
+            ):
+                result = await mgr.add_subscription("https://kick.com/someone", **_ADD_KWARGS)
+                await asyncio.sleep(0.05)
+            self.assertEqual(result["subscription"]["kind"], "live")
+            self.assertEqual(result["subscription"]["name"], "Someone")
+
+    async def test_plain_video_is_still_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist", return_value=({"_type": "video"}, [])
+            ), patch("subscriptions.validate_url", return_value=None):
+                result = await mgr.add_subscription("https://example.com/watch", **_ADD_KWARGS)
+            self.assertEqual(result, {"status": "error", "msg": VIDEO_ONLY_MSG})
+
+    async def test_invalid_categories_rejected_on_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            result = await mgr.add_subscription(
+                "https://www.twitch.tv/someone", **_ADD_KWARGS, live_categories=[5]
+            )
+            self.assertEqual(result["status"], "error")
+
+    async def test_live_check_captures_matching_stream_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            result = await self._add_offline_live(mgr, live_categories=["chess"])
+            sub_id = result["subscription"]["id"]
+            self.assertEqual(queue.entries, [])
+            self.assertFalse(mgr.get(sub_id).live_now)
+
+            stream = {
+                "id": "s-100",
+                "title": "Ranked",
+                "categories": ["Chess"],
+                "url": "https://www.twitch.tv/someone",
+                "uploader": "Someone",
+            }
+            with patch("subscriptions.probe_live_channel", return_value=stream):
+                await mgr.check_now([sub_id])
+                await mgr.check_now([sub_id])
+
+            self.assertEqual(len(queue.entries), 1)
+            entry, args, kwargs = queue.entries[0]
+            self.assertEqual(entry["webpage_url"], "https://www.twitch.tv/someone")
+            self.assertEqual(entry["id"], "s-100")
+            self.assertEqual(entry["title"], "Someone - Ranked")
+            self.assertEqual(entry["live_status"], "is_live")
+            sub = mgr.get(sub_id)
+            self.assertTrue(sub.live_now)
+            self.assertEqual(sub.live_title, "Ranked")
+            self.assertEqual(sub.live_category, "Chess")
+            self.assertIn("s-100", sub.seen_ids)
+            self.assertIsNone(sub.error)
+
+            # A new stream on the same channel is captured too.
+            with patch("subscriptions.probe_live_channel", return_value={**stream, "id": "s-101"}):
+                await mgr.check_now([sub_id])
+            self.assertEqual(len(queue.entries), 2)
+
+    async def test_live_check_skips_non_matching_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            result = await self._add_offline_live(mgr, live_categories=["Chess"])
+            sub_id = result["subscription"]["id"]
+            stream = {"id": "s1", "title": "x", "categories": ["Art"], "url": "u", "uploader": ""}
+            with patch("subscriptions.probe_live_channel", return_value=stream):
+                await mgr.check_now([sub_id])
+            self.assertEqual(queue.entries, [])
+            sub = mgr.get(sub_id)
+            self.assertTrue(sub.live_now)
+            self.assertEqual(sub.seen_ids, [])
+
+            # Editing the categories lets the next check capture it.
+            await mgr.update_subscription(sub_id, {"live_categories": ["art"]})
+            with patch("subscriptions.probe_live_channel", return_value=stream):
+                await mgr.check_now([sub_id])
+            self.assertEqual(len(queue.entries), 1)
+
+    async def test_failed_capture_is_retried_while_still_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            failed: set[tuple[str, str]] = set()
+            queue.live_capture_failed = lambda url, eid: (url, eid) in failed
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            result = await self._add_offline_live(mgr)
+            sub_id = result["subscription"]["id"]
+            stream = {"id": "s1", "title": "t", "categories": [], "url": "https://kick.com/a", "uploader": ""}
+            with patch("subscriptions.probe_live_channel", return_value=stream):
+                await mgr.check_now([sub_id])
+                await mgr.check_now([sub_id])
+                self.assertEqual(len(queue.entries), 1)
+                failed.add(("https://kick.com/a", "s1"))
+                await mgr.check_now([sub_id])
+            self.assertEqual(len(queue.entries), 2)
+
+    async def test_live_check_error_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            result = await self._add_offline_live(mgr)
+            sub_id = result["subscription"]["id"]
+            err = subscriptions.yt_dlp.utils.YoutubeDLError("someone does not exist")
+            with patch("subscriptions.probe_live_channel", side_effect=err):
+                await mgr.check_now([sub_id])
+            sub = mgr.get(sub_id)
+            self.assertEqual(sub.error, "someone does not exist")
+            self.assertFalse(sub.live_now)
+            self.assertIsNotNone(sub.last_checked)
+
+    async def test_feed_subscription_defaults_to_feed_kind(self):
+        sub = SubscriptionInfo(id="a", name="A", url="https://example.com/c")
+        self.assertEqual(sub.kind, "feed")
+        self.assertEqual(sub.to_public_dict()["live_categories"], [])
+
+
+class TwitchCategoryExtractorTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            from yt_dlp.extractor.twitch import TwitchStreamIE  # noqa: F401
+        except Exception:
+            self.skipTest("real yt_dlp not importable (stubbed in this run)")
+        subscriptions._twitch_category_ie_cls = None
+        self.addCleanup(setattr, subscriptions, "_twitch_category_ie_cls", None)
+
+    def test_category_and_stream_title_come_from_the_existing_gql_response(self):
+        from yt_dlp.extractor.twitch import TwitchBaseIE, TwitchStreamIE
+
+        gql = [
+            {"data": {"user": {"stream": {"id": "42", "type": "live", "createdAt": None,
+                                          "viewers": 1, "game": {"name": "Chess"}}}}},
+            {"data": {"user": {"displayName": "Someone",
+                               "broadcastSettings": {"title": "Ranked grind"}}}},
+            {"data": {"user": {"stream": {"previewImageURL": None}}}},
+        ]
+        ie_cls = subscriptions._twitch_category_ie()
+        self.assertTrue(issubclass(ie_cls, TwitchStreamIE))
+        ie = ie_cls()
+        with patch.object(TwitchBaseIE, "_download_gql", return_value=gql), patch.object(
+            TwitchBaseIE, "_download_access_token", return_value={"value": "v", "signature": "s"}, create=True
+        ), patch.object(TwitchBaseIE, "_extract_twitch_m3u8_formats", return_value=[], create=True), patch.object(
+            TwitchStreamIE, "get_param", return_value=None
+        ):
+            info = ie._real_extract("https://www.twitch.tv/someone")
+        self.assertEqual(info["categories"], ["Chess"])
+        self.assertEqual(info["description"], "Ranked grind")
+        self.assertTrue(info["is_live"])

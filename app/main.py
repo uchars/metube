@@ -1143,6 +1143,7 @@ async def subscribe(request):
         skip_subscriber_only=skip_subscriber_only,
         clip_start=sub_clip_start,
         clip_end=sub_clip_end,
+        live_categories=post.get('live_categories'),
     )
     return web.Response(text=serializer.encode(result))
 
@@ -1162,7 +1163,10 @@ async def subscriptions_update(request):
         k: v
         for k, v in post.items()
         if k != 'id'
-        and k in ('enabled', 'check_interval_minutes', 'name', 'folder', 'title_regex', 'skip_subscriber_only')
+        and k in (
+            'enabled', 'check_interval_minutes', 'name', 'folder', 'title_regex',
+            'skip_subscriber_only', 'live_categories',
+        )
     }
     if not changes:
         raise web.HTTPBadRequest(reason='no valid fields to update')

@@ -443,7 +443,7 @@
                 </div>
                 <div class="col-md-6">
                   <div class="input-group">
-                    <span class="input-group-text help-title" ngbPopover="How often to poll subscriptions for new videos." triggers="click" autoClose="outside" container="body">Subscription Check (min)</span>
+                    <span class="input-group-text help-title" ngbPopover="How often to poll subscriptions for new videos, or, for a live channel, whether it has gone live." triggers="click" autoClose="outside" container="body">Subscription Check (min)</span>
                     <input type="number"
                       min="1"
                       class="form-control"
@@ -456,13 +456,24 @@
                 </div>
                 <div class="col-md-6">
                   <div class="input-group">
-                    <span class="input-group-text help-title" ngbPopover="In subscriptions, only titles matching this Python-style regex are queued. Empty = all. Case-sensitive; use (?i) in the pattern for case-insensitive." triggers="click" autoClose="outside" container="body">Subscription Title Filter</span>
+                    <span class="input-group-text help-title" ngbPopover="In subscriptions, only titles matching this Python-style regex are queued (for a live channel: the stream title). Empty = all. Case-sensitive; use (?i) in the pattern for case-insensitive. Matches anywhere in the title, so 'speedrun' works like *speedrun*." triggers="click" autoClose="outside" container="body">Subscription Title Filter</span>
                     <input type="text"
                       class="form-control"
                       name="titleRegex"
                       [(ngModel)]="titleRegex"
                       [disabled]="addInProgress || subscribeInProgress || downloads.loading"
                       placeholder="Optional regex">
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text help-title" ngbPopover="Live channel subscriptions only (subscribe to a Twitch, Kick or YouTube /live channel URL): record a stream only while its category is one of these. Comma-separated, case-insensitive; empty = any category. Combined with the title filter, both must match." triggers="click" autoClose="outside" container="body">Live Stream Categories</span>
+                    <input type="text"
+                      class="form-control"
+                      name="liveCategories"
+                      [(ngModel)]="liveCategories"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading"
+                      placeholder="e.g. Just Chatting, Chess">
                   </div>
                 </div>
                 <div class="col-12">
@@ -985,6 +996,12 @@
                 } @else {
                   <div class="d-flex flex-wrap gap-1 align-items-center">
                     <span class="text-break">{{ entry[1].name }}</span>
+                    @if (entry[1].kind === 'live') {
+                      <span class="badge"
+                        [class.text-bg-danger]="entry[1].live_now"
+                        [class.text-bg-secondary]="!entry[1].live_now"
+                        ngbTooltip="Records each stream on this channel that matches the filters">Live channel</span>
+                    }
                     <button type="button" class="btn btn-link btn-sm p-0"
                       (click)="beginEditName(entry[0], entry[1].name)"
                       [disabled]="downloads.loading"
@@ -1018,6 +1035,33 @@
                       ngbTooltip="Edit subscription title filter (subscriptions only; not for one-off downloads)">Edit</button>
                   </div>
                 }
+                @if (entry[1].kind === 'live') {
+                  @if (editingLiveCategoriesId === entry[0]) {
+                    <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
+                      <input type="text"
+                        class="form-control form-control-sm flex-grow-1"
+                        [name]="'subLiveCategories' + entry[0]"
+                        [(ngModel)]="liveCategoriesEditDraft"
+                        placeholder="Comma-separated categories"
+                        [disabled]="downloads.loading"
+                        [attr.aria-label]="'Live categories for ' + entry[1].name" />
+                      <button type="button" class="btn btn-sm btn-outline-secondary"
+                        (click)="saveLiveCategories(entry[0])"
+                        [disabled]="downloads.loading">Save</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary"
+                        (click)="cancelEditLiveCategories()"
+                        [disabled]="downloads.loading">Cancel</button>
+                    </div>
+                  } @else {
+                    <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
+                      <span class="text-muted small text-break">Categories: {{ entry[1].live_categories?.length ? entry[1].live_categories!.join(', ') : 'any' }}</span>
+                      <button type="button" class="btn btn-link btn-sm p-0"
+                        (click)="beginEditLiveCategories(entry[0], entry[1].live_categories)"
+                        [disabled]="downloads.loading"
+                        ngbTooltip="Edit the stream categories this live channel records">Edit</button>
+                    </div>
+                  }
+                }
               </td>
               <td>{{ entry[1].check_interval_minutes }}</td>
               <td class="text-nowrap">
@@ -1030,6 +1074,19 @@
               <td>
                 @if (entry[1].error) {
                   <span class="text-danger small">{{ entry[1].error }}</span>
+                } @else if (entry[1].kind === 'live' && entry[1].enabled) {
+                  @if (entry[1].live_now) {
+                    <span class="text-danger">Live</span>
+                    @if (entry[1].live_title || entry[1].live_category) {
+                      <div class="text-muted small text-break">
+                        {{ entry[1].live_title }}@if (entry[1].live_category) { ({{ entry[1].live_category }})}
+                      </div>
+                    }
+                  } @else if (entry[1].last_checked !== null) {
+                    <span class="text-secondary">Offline</span>
+                  } @else {
+                    <span class="text-success">Active</span>
+                  }
                 } @else if (entry[1].enabled) {
                   <span class="text-success">Active</span>
                 } @else {

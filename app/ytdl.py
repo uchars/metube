@@ -2287,6 +2287,21 @@ class DownloadQueue:
             audio_tags=audio_tags,
         )
 
+    def live_capture_failed(self, url, entry_id):
+        """True when the last capture of stream ``entry_id`` from ``url`` ended in error.
+
+        Live subscriptions use it to capture a stream again after a dropped
+        connection. A cancelled capture never reaches the done list, so it
+        doesn't count, and neither does a capture still in the queue.
+        """
+        if self.queue.exists(url) or self.pending.exists(url) or not self.done.exists(url):
+            return False
+        info = self.done.get(url).info
+        stored_id = str(info.id)
+        # DownloadInfo prefixes the id with custom_name_prefix when one is set.
+        same_stream = stored_id == str(entry_id) or stored_id.endswith(f'.{entry_id}')
+        return info.status == 'error' and same_stream
+
     async def start_pending(self, ids):
         for id in ids:
             if self.pending.exists(id):

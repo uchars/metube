@@ -1,4 +1,10 @@
-"""Channel/playlist subscriptions: periodic yt-dlp flat extract + queue new videos."""
+"""Channel/playlist subscriptions: periodic yt-dlp flat extract + queue new videos.
+
+A subscription whose URL is a live channel (Twitch, Kick, a YouTube ``/live``
+page, ...) is a *live* subscription instead: each check asks yt-dlp whether the
+channel is live right now and queues a capture when it is and the stream
+matches the subscription's category/title filters.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +38,17 @@ VIDEO_ONLY_MSG = (
     "This URL points to a single video, not a channel or playlist. Use Download instead."
 )
 NO_ENTRIES_MSG = "No entries found at this URL."
+NO_CATEGORY_MSG = (
+    "Channel is live, but yt-dlp reported no stream category, so the category filter cannot match."
+)
+
+KIND_FEED = "feed"
+KIND_LIVE = "live"
+
+# Bounds for the per-subscription live category list; it is persisted and
+# broadcast to every connected client.
+LIVE_CATEGORIES_MAX = 50
+LIVE_CATEGORY_MAX_LENGTH = 100
 _MEDIA_HINT_FIELDS = (
     "duration",
     "timestamp",
@@ -148,6 +165,172 @@ def extract_flat_playlist(
 
 def _entry_video_url(entry: dict) -> Optional[str]:
     return entry.get("webpage_url") or entry.get("url")
+
+
+def _is_not_live_error(exc: BaseException) -> bool:
+    """True when a yt-dlp error means "this channel is not live right now"."""
+    not_live = getattr(getattr(yt_dlp, "utils", None), "UserNotLive", None)
+    if not isinstance(not_live, type):
+        return False
+    if isinstance(exc, not_live):
+        return True
+    # YoutubeDL wraps extractor errors in a DownloadError carrying the original.
+    exc_info = getattr(exc, "exc_info", None)
+    cause = exc_info[1] if isinstance(exc_info, tuple) and len(exc_info) > 1 else None
+    return isinstance(cause, not_live)
+
+
+def _is_live_info(info: Any) -> bool:
+    if not isinstance(info, dict):
+        return False
+    return info.get("live_status") == "is_live" or info.get("is_live") is True
+
+
+_twitch_category_ie_cls: Any = None
+
+
+def _twitch_category_ie():
+    """yt-dlp's Twitch stream extractor, also reporting the stream's category.
+
+    yt-dlp's ``twitch:stream`` extractor already fetches the stream metadata
+    that names the game/category, but does not put it in the info dict (and
+    puts the stream title in ``description``). This subclass keeps the first
+    GraphQL response it downloads and copies the category into ``categories``,
+    so no extra request is made. Any failure leaves ``categories`` unset.
+    """
+    global _twitch_category_ie_cls
+    if _twitch_category_ie_cls is not None:
+        return _twitch_category_ie_cls or None
+    try:
+        from yt_dlp.extractor.twitch import TwitchStreamIE
+    except Exception:  # stubbed yt_dlp in tests, or an extractor rename upstream
+        _twitch_category_ie_cls = False
+        return None
+
+    class MeTubeTwitchStreamIE(TwitchStreamIE):
+        IE_NAME = TwitchStreamIE.IE_NAME
+
+        def _download_gql(self, *args, **kwargs):
+            data = super()._download_gql(*args, **kwargs)
+            if getattr(self, "_metube_gql", None) is None:
+                self._metube_gql = data
+            return data
+
+        def _real_extract(self, url):
+            self._metube_gql = None
+            info = super()._real_extract(url)
+            try:
+                gql = self._metube_gql or []
+                names = []
+                for path in (
+                    (0, "data", "user", "stream", "game", "name"),
+                    (1, "data", "user", "broadcastSettings", "game", "name"),
+                ):
+                    node: Any = gql
+                    for key in path:
+                        if isinstance(key, int):
+                            node = node[key] if isinstance(node, list) and len(node) > key else None
+                        else:
+                            node = node.get(key) if isinstance(node, dict) else None
+                    if isinstance(node, str) and node.strip():
+                        names.append(node.strip())
+                if names and not info.get("categories"):
+                    info["categories"] = list(dict.fromkeys(names))
+            except Exception as exc:
+                log.debug("Could not read Twitch stream category: %s", exc)
+            return info
+
+    _twitch_category_ie_cls = MeTubeTwitchStreamIE
+    return MeTubeTwitchStreamIE
+
+
+class _ProbeLogger:
+    """yt-dlp logger for live probes: an offline channel is a yt-dlp ERROR, and
+    would otherwise print one on every check. Real failures still raise."""
+
+    def debug(self, msg):
+        log.debug("%s", msg)
+
+    def info(self, msg):
+        log.debug("%s", msg)
+
+    def warning(self, msg):
+        log.debug("%s", msg)
+
+    def error(self, msg):
+        log.debug("%s", msg)
+
+
+def probe_live_channel(config, url: str, *, extra_opts: Optional[dict[str, Any]] = None) -> Optional[dict]:
+    """Ask yt-dlp whether a live channel is streaming right now.
+
+    Returns None when the channel is offline, otherwise a dict with the stream's
+    ``id``, ``title``, ``categories``, ``url`` and ``uploader``. Other extraction
+    errors propagate as yt-dlp errors. Nothing is downloaded.
+    """
+    params = _build_ydl_params(config, extra_opts=extra_opts)
+    # Resolve the channel's stream, not a flat placeholder for it.
+    params.pop("extract_flat", None)
+    params["logger"] = _ProbeLogger()
+    proxies = download_proxies({**config.YTDL_OPTIONS, **(extra_opts or {})})
+    try:
+        with yt_dlp.YoutubeDL(params=params) as ydl:
+            ie_key = None
+            twitch_ie = _twitch_category_ie()
+            if twitch_ie is not None and twitch_ie.suitable(url):
+                ydl.add_info_extractor(twitch_ie())
+                ie_key = twitch_ie.ie_key()
+            info = ydl.extract_info(url, download=False, process=False, ie_key=ie_key)
+            # A YouTube /live page resolves to a pointer at the current stream.
+            if isinstance(info, dict) and str(info.get("_type") or "").startswith("url") and info.get("url"):
+                nested_url = str(info["url"])
+                if validate_url(
+                    nested_url,
+                    allow_private=getattr(config, "ALLOW_PRIVATE_ADDRESSES", False),
+                    proxies=proxies,
+                ) is not None:
+                    return None
+                info = ydl.extract_info(
+                    nested_url, download=False, process=False, ie_key=info.get("ie_key")
+                )
+    except yt_dlp.utils.YoutubeDLError as exc:
+        if _is_not_live_error(exc):
+            return None
+        raise
+    if not _is_live_info(info):
+        return None
+    is_twitch = twitch_ie is not None and ie_key == twitch_ie.ie_key()
+    # Twitch's own title is "<channel> (live)"; the stream title is the description.
+    stream_title = (info.get("description") if is_twitch else None) or info.get("title") or ""
+    categories = info.get("categories")
+    if not isinstance(categories, list):
+        categories = []
+    return {
+        "id": str(info.get("id") or url),
+        "title": " ".join(str(stream_title).split()),
+        "categories": [str(c).strip() for c in categories if isinstance(c, str) and c.strip()],
+        "url": info.get("webpage_url") or url,
+        "uploader": info.get("uploader") or info.get("channel") or "",
+    }
+
+
+def live_stream_matches(
+    stream: dict, categories: list[str], title_pattern: Optional[re.Pattern[str]]
+) -> tuple[bool, Optional[str]]:
+    """Return (matches, error) for a live stream against a live subscription's filters.
+
+    Both filters must pass when both are set. Categories compare
+    case-insensitively against any category yt-dlp reports for the stream.
+    """
+    if categories:
+        stream_cats = {c.casefold() for c in stream.get("categories") or []}
+        if not stream_cats:
+            return False, NO_CATEGORY_MSG
+        if not any(c.casefold() in stream_cats for c in categories):
+            return False, None
+    if title_pattern is not None and not title_pattern.search(stream.get("title") or ""):
+        return False, None
+    return True, None
 
 
 async def browse_playlist(
@@ -275,6 +458,15 @@ class SubscriptionInfo:
     # field name, so nothing needs migrating.
     clip_start: Optional[float] = None
     clip_end: Optional[float] = None
+    # "feed" polls a channel/playlist for new videos; "live" polls a live
+    # channel and captures each stream that matches live_categories/title_regex.
+    # seen_ids then holds the stream ids already captured.
+    kind: str = KIND_FEED
+    live_categories: list[str] = field(default_factory=list)
+    # What the last live check saw, for the UI.
+    live_now: bool = False
+    live_title: str = ""
+    live_category: str = ""
     last_checked: Optional[float] = None
     seen_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -299,6 +491,11 @@ class SubscriptionInfo:
             "skip_subscriber_only": self.skip_subscriber_only,
             "clip_start": self.clip_start,
             "clip_end": self.clip_end,
+            "kind": self.kind,
+            "live_categories": list(self.live_categories),
+            "live_now": self.live_now,
+            "live_title": self.live_title,
+            "live_category": self.live_category,
             "last_checked": self.last_checked,
             "seen_count": len(self.seen_ids),
             "error": self.error,
@@ -332,6 +529,11 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "skip_subscriber_only": sub.skip_subscriber_only,
         "clip_start": sub.clip_start,
         "clip_end": sub.clip_end,
+        "kind": sub.kind,
+        "live_categories": list(sub.live_categories),
+        "live_now": sub.live_now,
+        "live_title": sub.live_title,
+        "live_category": sub.live_category,
         "last_checked": sub.last_checked,
         "seen_ids": list(sub.seen_ids),
         "error": sub.error,
@@ -383,6 +585,43 @@ def validate_title_regex(value: Any) -> str:
     if s:
         re.compile(s)
     return s
+
+
+def validate_live_categories(value: Any) -> list[str]:
+    """Return a stored live category list, or raise ValueError if unusable.
+
+    Accepts a list of strings or one comma-separated string. Entries are
+    trimmed and de-duplicated case-insensitively; an empty list means any
+    category.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items: list[Any] = value.split(",")
+    elif isinstance(value, list):
+        items = value
+    else:
+        raise ValueError("live_categories must be a list of strings")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("live_categories must be a list of strings")
+        name = " ".join(item.split())
+        if not name:
+            continue
+        if len(name) > LIVE_CATEGORY_MAX_LENGTH:
+            raise ValueError(
+                f"each live category must be at most {LIVE_CATEGORY_MAX_LENGTH} characters"
+            )
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+    if len(out) > LIVE_CATEGORIES_MAX:
+        raise ValueError(f"at most {LIVE_CATEGORIES_MAX} live categories are allowed")
+    return out
 
 
 # The name is a display label the user picks; it is persisted and broadcast to
@@ -697,10 +936,15 @@ class SubscriptionManager:
         skip_subscriber_only: Any = None,
         clip_start: Optional[float] = None,
         clip_end: Optional[float] = None,
+        live_categories: Any = None,
     ) -> dict:
         url = self._normalize_url(url)
         if not url:
             return {"status": "error", "msg": "Missing URL"}
+        try:
+            live_categories_stored = validate_live_categories(live_categories)
+        except ValueError as exc:
+            return {"status": "error", "msg": str(exc)}
         # SSRF guard: block non-http(s) schemes and internal/metadata hosts
         # before yt-dlp fetches the feed. May do a DNS lookup, so run off-loop.
         # The scan's own options pick the proxy, so a feed fetched through one
@@ -737,37 +981,74 @@ class SubscriptionManager:
         try:
             scan_first = max(int(getattr(self.config, "SUBSCRIPTION_SCAN_PLAYLIST_END", 50)), 1)
             scan_extra_opts = self._scan_extra_opts(ytdl_options_presets, ytdl_options_overrides)
+            loop = asyncio.get_running_loop()
+            kind = KIND_FEED
+            live_stream: Optional[dict] = None
             try:
-                info, entries = await asyncio.get_running_loop().run_in_executor(
+                info, entries = await loop.run_in_executor(
                     None,
                     partial(extract_flat_playlist, self.config, url, scan_first, extra_opts=scan_extra_opts),
                 )
             except yt_dlp.utils.YoutubeDLError as exc:
-                return {"status": "error", "msg": str(exc)}
+                # An offline live channel (Twitch, Kick, YouTube /live, ...).
+                if not _is_not_live_error(exc):
+                    return {"status": "error", "msg": str(exc)}
+                kind = KIND_LIVE
+                info, entries = None, []
 
-            if not info:
-                return {"status": "error", "msg": "Could not resolve URL"}
+            if kind == KIND_FEED:
+                if not info:
+                    return {"status": "error", "msg": "Could not resolve URL"}
+                etype = info.get("_type") or "video"
+                if etype not in ("playlist", "channel"):
+                    if _is_live_info(info):
+                        kind = KIND_LIVE
+                    elif etype.startswith("url"):
+                        # A /live page pointing at the channel's current stream.
+                        try:
+                            live_stream = await loop.run_in_executor(
+                                None,
+                                partial(probe_live_channel, self.config, url, extra_opts=scan_extra_opts),
+                            )
+                        except yt_dlp.utils.YoutubeDLError as exc:
+                            return {"status": "error", "msg": str(exc)}
+                        if live_stream is None:
+                            return {"status": "error", "msg": VIDEO_ONLY_MSG}
+                        kind = KIND_LIVE
+                    else:
+                        return {"status": "error", "msg": VIDEO_ONLY_MSG}
 
-            etype = info.get("_type") or "video"
-            if etype not in ("playlist", "channel"):
-                return {"status": "error", "msg": VIDEO_ONLY_MSG}
-
-            name = (
-                info.get("title")
-                or info.get("channel")
-                or info.get("playlist_title")
-                or info.get("uploader")
-                or url
-            )
-
-            seen_entries = [ent for ent in entries if _is_media_entry(ent)]
             all_ids: list[str] = []
-            for ent in seen_entries:
-                if ent.get("live_status") == "is_upcoming":
-                    continue  # Don't mark scheduled streams as seen; queue them when they go live
-                eid = _entry_id(ent)
-                if eid:
-                    all_ids.append(eid)
+            if kind == KIND_LIVE:
+                info = info or {}
+                # The display name is the channel, not the current stream title.
+                name = (
+                    info.get("uploader")
+                    or info.get("channel")
+                    or (live_stream or {}).get("uploader")
+                    or url.rstrip("/").rsplit("/", 1)[-1]
+                    or url
+                )
+                # No seen ids: a stream already live when subscribing is
+                # captured on the first check, if it matches the filters.
+                last_checked: Optional[float] = None
+            else:
+                name = (
+                    info.get("title")
+                    or info.get("channel")
+                    or info.get("playlist_title")
+                    or info.get("uploader")
+                    or url
+                )
+                last_checked = time.time()
+
+                seen_entries = [ent for ent in entries if _is_media_entry(ent)]
+                for ent in seen_entries:
+                    if ent.get("live_status") == "is_upcoming":
+                        continue  # Don't mark scheduled streams as seen; queue them when they go live
+                    eid = _entry_id(ent)
+                    if eid:
+                        all_ids.append(eid)
 
             sub = SubscriptionInfo(
                 id=str(uuid.uuid4()),
@@ -795,7 +1076,9 @@ class SubscriptionManager:
                 skip_subscriber_only=skip_so,
                 clip_start=clip_start,
                 clip_end=clip_end,
-                last_checked=time.time(),
+                kind=kind,
+                live_categories=live_categories_stored,
+                last_checked=last_checked,
                 seen_ids=list(dict.fromkeys(all_ids)),
                 error=None,
             )
@@ -813,6 +1096,10 @@ class SubscriptionManager:
                     raise
 
             await self.notifier.subscription_added(sub)
+            if kind == KIND_LIVE:
+                log.info("Added live subscription %s (%s)", sub.name, url)
+                # Check straight away rather than waiting for the next minute tick.
+                bg_tasks.create_task(self._check_many([sub]), name="live_subscription_first_check")
             return {"status": "ok", "subscription": sub.to_public_dict()}
         finally:
             async with self._lock:
@@ -874,6 +1161,13 @@ class SubscriptionManager:
             except ValueError as exc:
                 return {"status": "error", "msg": str(exc)}
 
+        validated_categories: Optional[list[str]] = None
+        if "live_categories" in changes:
+            try:
+                validated_categories = validate_live_categories(changes["live_categories"])
+            except ValueError as exc:
+                return {"status": "error", "msg": str(exc)}
+
         enabled_set = False
         validated_enabled = False
         if "enabled" in changes:
@@ -913,6 +1207,8 @@ class SubscriptionManager:
                 sub.title_regex = validated_tr
             if skip_so_set:
                 sub.skip_subscriber_only = validated_skip_so
+            if validated_categories is not None:
+                sub.live_categories = validated_categories
 
             try:
                 self._save_locked()
@@ -954,7 +1250,10 @@ class SubscriptionManager:
                 return
             self._checks_in_flight.add(sid)
         try:
-            await self._check_one_inner(sub)
+            if sub.kind == KIND_LIVE:
+                await self._check_live_inner(sub)
+            else:
+                await self._check_one_inner(sub)
         finally:
             async with self._lock:
                 self._checks_in_flight.discard(sid)
@@ -1146,6 +1445,143 @@ class SubscriptionManager:
             cur.seen_ids = merged
             cur.last_checked = time.time()
             cur.error = "; ".join(list(dict.fromkeys(queue_errors))[:3]) if queue_errors else None
+            try:
+                self._save_locked()
+            except Exception:
+                self._subs[sid] = previous
+                raise
+            sub = cur
+        await self.notifier.subscription_updated(sub)
+
+    async def _check_live_inner(self, sub: SubscriptionInfo) -> None:
+        """Check a live subscription: capture the stream if live and matching.
+
+        Each stream is captured once (its id goes into seen_ids). A stream is
+        captured again only when its capture failed while the channel is still
+        live — a dropped connection — so a cancelled capture stays cancelled.
+        """
+        sid = sub.id
+        scan_extra_opts = self._scan_extra_opts(sub.ytdl_options_presets, sub.ytdl_options_overrides)
+        log.info("Checking live subscription: %s", sub.name)
+        try:
+            stream = await asyncio.get_running_loop().run_in_executor(
+                None,
+                partial(probe_live_channel, self.config, sub.url, extra_opts=scan_extra_opts),
+            )
+        except yt_dlp.utils.YoutubeDLError as exc:
+            log.warning("Live subscription check failed for %s: %s", sub.name, exc)
+            await self._finish_live_check(sid, live_now=False, error=str(exc))
+            return
+
+        if stream is None:
+            log.info("Live subscription check finished for %s: offline", sub.name)
+            await self._finish_live_check(sid, live_now=False)
+            return
+
+        async with self._lock:
+            cur = self._subs.get(sid)
+            if not cur:
+                return
+            categories = list(cur.live_categories)
+            title_regex = cur.title_regex or ""
+            seen = cur.seen_set()
+            opts = copy.deepcopy(cur)
+
+        pattern_re: Optional[re.Pattern[str]] = None
+        if title_regex:
+            try:
+                pattern_re = re.compile(title_regex)
+            except re.error:
+                log.warning("Invalid stored title_regex on subscription %s, ignoring filter", sub.name)
+
+        live_category = ", ".join(stream["categories"])
+        matches, match_error = live_stream_matches(stream, categories, pattern_re)
+        if not matches:
+            log.info(
+                "Live subscription check finished for %s: live, filters do not match (title=%r, categories=%r)",
+                sub.name, stream["title"], stream["categories"],
+            )
+            await self._finish_live_check(
+                sid, live_now=True, title=stream["title"], category=live_category, error=match_error,
+            )
+            return
+
+        stream_id = stream["id"]
+        stream_url = stream["url"] or sub.url
+        if stream_id in seen:
+            capture_failed = getattr(self.dqueue, "live_capture_failed", None)
+            if not (callable(capture_failed) and capture_failed(stream_url, stream_id)):
+                log.info("Live subscription check finished for %s: stream already captured", sub.name)
+                await self._finish_live_check(
+                    sid, live_now=True, title=stream["title"], category=live_category,
+                )
+                return
+            log.info("Live capture for %s failed while still live; capturing again", sub.name)
+
+        title_parts = [p for p in (stream.get("uploader"), stream["title"]) if p]
+        entry = {
+            "id": stream_id,
+            "title": " - ".join(dict.fromkeys(title_parts)) or stream_url,
+            "webpage_url": stream_url,
+            "live_status": "is_live",
+        }
+        queued_ids, queue_errors = await self._queue_subscription_entries(
+            [entry],
+            download_type=opts.download_type,
+            codec=opts.codec,
+            format=opts.format,
+            quality=opts.quality,
+            folder=opts.folder,
+            custom_name_prefix=opts.custom_name_prefix,
+            playlist_item_limit=opts.playlist_item_limit,
+            auto_start=opts.auto_start,
+            split_by_chapters=opts.split_by_chapters,
+            sponsorblock=opts.sponsorblock,
+            audio_tags=opts.audio_tags,
+            chapter_template=opts.chapter_template or "",
+            subtitle_language=opts.subtitle_language,
+            subtitle_mode=opts.subtitle_mode,
+            ytdl_options_presets=list(opts.ytdl_options_presets),
+            ytdl_options_overrides=dict(opts.ytdl_options_overrides),
+            clip_start=opts.clip_start,
+            clip_end=opts.clip_end,
+        )
+        log.info(
+            "Live subscription check finished for %s: live, %s",
+            sub.name,
+            "capture queued" if queued_ids else "queueing failed",
+        )
+        await self._finish_live_check(
+            sid,
+            live_now=True,
+            title=stream["title"],
+            category=live_category,
+            error="; ".join(queue_errors[:3]) if queue_errors else None,
+            captured_id=queued_ids[0] if queued_ids else None,
+        )
+
+    async def _finish_live_check(
+        self,
+        sid: str,
+        *,
+        live_now: bool,
+        title: str = "",
+        category: str = "",
+        error: Optional[str] = None,
+        captured_id: Optional[str] = None,
+    ) -> None:
+        async with self._lock:
+            cur = self._subs.get(sid)
+            if not cur:
+                return
+            previous = copy.deepcopy(cur)
+            cur.live_now = live_now
+            cur.live_title = title
+            cur.live_category = category
+            cur.error = error
+            cur.last_checked = time.time()
+            if captured_id is not None:
+                cur.seen_ids = self._normalize_seen_ids([captured_id] + list(cur.seen_ids))
             try:
                 self._save_locked()
             except Exception:

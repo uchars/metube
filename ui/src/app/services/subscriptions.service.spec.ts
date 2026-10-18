@@ -40,6 +40,7 @@ function basePayload(): SubscribePayload {
     checkIntervalMinutes: 60,
     titleRegex: '',
     skipSubscriberOnly: false,
+    liveCategories: [],
   };
 }
 
@@ -75,6 +76,22 @@ describe('SubscriptionsService', () => {
       .subscribe();
     const req = httpMock.expectOne('subscribe');
     expect(req.request.body).toEqual(expect.objectContaining({ audio_tags: 'none' }));
+    req.flush({ status: 'ok' });
+  });
+
+  it('subscribe() carries the live categories', () => {
+    service.subscribe({ ...basePayload(), liveCategories: ['Chess', 'Art'] }).subscribe();
+    const req = httpMock.expectOne('subscribe');
+    expect(req.request.body).toEqual(
+      expect.objectContaining({ live_categories: ['Chess', 'Art'] }),
+    );
+    req.flush({ status: 'ok' });
+  });
+
+  it('update() sends live category edits', () => {
+    service.update('s1', { live_categories: ['Chess'] }).subscribe();
+    const req = httpMock.expectOne('subscriptions/update');
+    expect(req.request.body).toEqual({ id: 's1', live_categories: ['Chess'] });
     req.flush({ status: 'ok' });
   });
 

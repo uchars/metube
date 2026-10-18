@@ -439,6 +439,23 @@ async def test_subscribe_passes_sponsorblock(mock_dqueue, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_subscribe_passes_live_categories(mock_dqueue, monkeypatch):
+    monkeypatch.setattr(main.submgr, "add_subscription", AsyncMock(return_value={"status": "ok"}))
+    req = _json_request(
+        {**_valid_video_add_body(), "check_interval_minutes": 2, "live_categories": ["Chess", "Art"]}
+    )
+    await main.subscribe(req)
+    assert main.submgr.add_subscription.await_args.kwargs["live_categories"] == ["Chess", "Art"]
+
+
+@pytest.mark.asyncio
+async def test_subscription_update_forwards_live_categories(mock_dqueue, monkeypatch):
+    monkeypatch.setattr(main.submgr, "update_subscription", AsyncMock(return_value={"status": "ok"}))
+    await main.subscriptions_update(_json_request({"id": "s1", "live_categories": ["Chess"]}))
+    main.submgr.update_subscription.assert_awaited_once_with("s1", {"live_categories": ["Chess"]})
+
+
+@pytest.mark.asyncio
 async def test_subscribe_defaults_sponsorblock_off(mock_dqueue, monkeypatch):
     monkeypatch.setattr(main.submgr, "add_subscription", AsyncMock(return_value={"status": "ok"}))
     req = _json_request({**_valid_video_add_body(), "check_interval_minutes": 60})

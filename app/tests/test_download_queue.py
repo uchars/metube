@@ -99,6 +99,34 @@ def test_get_returns_tuple_of_lists(dq_env):
 
 
 @pytest.mark.asyncio
+async def test_live_capture_failed_only_for_a_failed_capture_of_that_stream(dq_env):
+    dq = DownloadQueue(dq_env, AsyncMock())
+    url = "https://www.twitch.tv/someone"
+    assert dq.live_capture_failed(url, "s1") is False
+
+    def _done(status, entry_id, prefix=""):
+        info = DownloadInfo(
+            id=entry_id, title="t", url=url, quality="best", download_type="video",
+            codec="auto", format="any", folder="", custom_name_prefix=prefix, error=None,
+            entry=None, playlist_item_limit=0, split_by_chapters=False, chapter_template="",
+            subtitle_language="en", subtitle_mode="prefer_manual",
+        )
+        info.status = status
+        return Download(None, None, None, None, "best", "any", {}, info)
+
+    await dq.done.put(_done("error", "s1"))
+    assert dq.live_capture_failed(url, "s1") is True
+    # A different stream's failure doesn't count.
+    assert dq.live_capture_failed(url, "s2") is False
+
+    await dq.done.put(_done("error", "s1", prefix="rec"))
+    assert dq.live_capture_failed(url, "s1") is True
+
+    await dq.done.put(_done("finished", "s1"))
+    assert dq.live_capture_failed(url, "s1") is False
+
+
+@pytest.mark.asyncio
 async def test_add_single_video_goes_to_pending_when_auto_start_false(dq_env):
     notifier = AsyncMock()
 
