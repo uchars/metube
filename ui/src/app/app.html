@@ -474,6 +474,30 @@
                     [platform]="categoryPlatform(addUrl)"
                     [disabled]="addInProgress || subscribeInProgress || downloads.loading" />
                 </div>
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text help-title" ngbPopover="Live channel subscriptions only: once a recording's stream has been outside the categories (or title filter) for this many minutes, stop the recording and keep the file. When it matches again, a new recording starts. 0 = never stop." triggers="click" autoClose="outside" container="body">Stop After Off-Category (min)</span>
+                    <input type="number"
+                      min="0"
+                      class="form-control"
+                      name="liveStopAfterMinutes"
+                      (keydown)="isNumber($event)"
+                      [(ngModel)]="liveStopAfterMinutes"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading">
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="input-group">
+                    <span class="input-group-text help-title" ngbPopover="Live channel subscriptions only: how often to re-check the stream's category while a recording runs (the Subscription Check interval applies otherwise, whichever is shorter)." triggers="click" autoClose="outside" container="body">Re-check While Recording (min)</span>
+                    <input type="number"
+                      min="1"
+                      class="form-control"
+                      name="liveRecheckMinutes"
+                      (keydown)="isNumber($event)"
+                      [(ngModel)]="liveRecheckMinutes"
+                      [disabled]="addInProgress || subscribeInProgress || downloads.loading">
+                  </div>
+                </div>
                 <div class="col-12">
                   <div class="form-check form-switch">
                     <input class="form-check-input" type="checkbox" role="switch" id="checkbox-skip-subscriber-only"
@@ -1063,7 +1087,20 @@
                   }
                 }
               </td>
-              <td>{{ entry[1].check_interval_minutes }}</td>
+              <td>
+                {{ entry[1].check_interval_minutes }}
+                @if (entry[1].kind === 'live') {
+                  <div class="text-muted small text-nowrap"
+                    ngbTooltip="Check interval while a recording runs">{{ entry[1].live_recheck_minutes ?? 5 }} while recording</div>
+                  <div class="text-muted small text-nowrap">
+                    @if (entry[1].live_stop_after_minutes) {
+                      stops {{ entry[1].live_stop_after_minutes }} min off-category
+                    } @else {
+                      never stops early
+                    }
+                  </div>
+                }
+              </td>
               <td class="text-nowrap">
                 @if (entry[1].last_checked !== null) {
                   <span>{{ entry[1].last_checked! * 1000 | date:'yyyy-MM-dd HH:mm:ss' }}</span>
@@ -1076,7 +1113,12 @@
                   <span class="text-danger small">{{ entry[1].error }}</span>
                 } @else if (entry[1].kind === 'live' && entry[1].enabled) {
                   @if (entry[1].live_now) {
-                    <span class="text-danger">Live</span>
+                    <span class="text-danger">{{ entry[1].live_recording ? 'Recording' : 'Live' }}</span>
+                    @if (entry[1].live_recording && entry[1].live_mismatch_since) {
+                      <div class="text-warning-emphasis small">
+                        Off-category since {{ entry[1].live_mismatch_since! * 1000 | date:'HH:mm' }}
+                      </div>
+                    }
                     @if (entry[1].live_title || entry[1].live_category) {
                       <div class="text-muted small text-break">
                         {{ entry[1].live_title }}@if (entry[1].live_category) { ({{ entry[1].live_category }})}

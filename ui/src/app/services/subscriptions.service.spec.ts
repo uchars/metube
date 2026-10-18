@@ -41,6 +41,8 @@ function basePayload(): SubscribePayload {
     titleRegex: '',
     skipSubscriberOnly: false,
     liveCategories: [],
+    liveStopAfterMinutes: 10,
+    liveRecheckMinutes: 5,
   };
 }
 
@@ -84,6 +86,17 @@ describe('SubscriptionsService', () => {
     const req = httpMock.expectOne('subscribe');
     expect(req.request.body).toEqual(
       expect.objectContaining({ live_categories: ['Chess', 'Art'] }),
+    );
+    req.flush({ status: 'ok' });
+  });
+
+  it('subscribe() carries the live recording stop settings', () => {
+    service
+      .subscribe({ ...basePayload(), liveStopAfterMinutes: 0, liveRecheckMinutes: 3 })
+      .subscribe();
+    const req = httpMock.expectOne('subscribe');
+    expect(req.request.body).toEqual(
+      expect.objectContaining({ live_stop_after_minutes: 0, live_recheck_minutes: 3 }),
     );
     req.flush({ status: 'ok' });
   });

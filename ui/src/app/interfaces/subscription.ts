@@ -19,6 +19,13 @@ export interface SubscriptionRow {
   live_now?: boolean;
   live_title?: string;
   live_category?: string;
+  /** Stop a recording once the stream has not matched for this long; 0 = never. */
+  live_stop_after_minutes?: number;
+  /** Check interval while one of this subscription's recordings runs. */
+  live_recheck_minutes?: number;
+  /** When the running recording's stream was first seen not matching (epoch seconds). */
+  live_mismatch_since?: number | null;
+  live_recording?: boolean;
   last_checked: number | null;
   seen_count: number;
   error: string | null;

@@ -2159,3 +2159,67 @@ async def test_clear_in_ask_mode_without_delete_files_kwarg_keeps_file(dq_env):
 
     assert os.path.exists(file_path)
     assert not dq.done.exists(download.info.url)
+
+
+def test_stop_interrupts_without_cancelling(dq_env):
+    download = _make_download(dq_env, status="downloading")
+    download.proc = MagicMock()
+    download.proc.is_alive.return_value = True
+    download.loop = MagicMock()
+    with patch.object(Download, "_signal_group", return_value=True) as sig:
+        assert download.stop() is True
+        # A second stop while finalizing is a no-op.
+        assert download.stop() is False
+    import signal as _signal
+    sig.assert_called_once_with(_signal.SIGINT)
+    assert download.stopping is True
+    assert download.canceled is False
+    # Escalation is long enough for postprocessing a long recording.
+    delay = download.loop.call_later.call_args.args[0]
+    assert delay >= 600
+
+
+@pytest.mark.asyncio
+async def test_stopped_recording_lands_in_done_list(dq_env):
+    dq = DownloadQueue(dq_env, AsyncMock())
+    download = _make_download(dq_env, status="finished", filename="rec.mp4")
+    download.stopping = True
+    await dq.queue.put(download)
+
+    await dq._post_download_cleanup(download)
+
+    assert dq.done.exists(download.info.url)
+    assert download.info.status == "finished"
+    assert download.info.filename == "rec.mp4"
+
+
+@pytest.mark.asyncio
+async def test_stop_that_could_not_finalize_keeps_the_partial_file(dq_env):
+    dq = DownloadQueue(dq_env, AsyncMock())
+    download = _make_download(dq_env, status="downloading")
+    part = os.path.join(dq_env.DOWNLOAD_DIR, "rec.mp4.part")
+    open(part, "wb").close()
+    download.tmpfilename = part
+    download.stopping = True
+    await dq.queue.put(download)
+
+    await dq._post_download_cleanup(download)
+
+    assert os.path.exists(part)
+    assert download.info.status == "error"
+    assert part in download.info.msg
+    assert dq.done.exists(download.info.url)
+
+
+@pytest.mark.asyncio
+async def test_live_capture_state_and_stop(dq_env):
+    dq = DownloadQueue(dq_env, AsyncMock())
+    download = _make_download(dq_env, status="downloading")
+    url = download.info.url
+    assert dq.live_capture_state(url) == "none"
+    await dq.queue.put(download)
+    assert dq.live_capture_state(url) == "active"
+    with patch.object(Download, "stop", autospec=True, side_effect=lambda self: setattr(self, "stopping", True) or True):
+        assert dq.stop_live_capture(url) is True
+    assert dq.live_capture_state(url) == "stopping"
+    assert dq.stop_live_capture("https://example.com/other") is False

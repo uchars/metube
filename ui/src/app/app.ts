@@ -112,6 +112,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   checkIntervalMinutes = 60;
   titleRegex = '';
   liveCategories: string[] = [];
+  liveStopAfterMinutes = 10;
+  liveRecheckMinutes = 5;
   skipSubscriberOnly = false;
   editingTitleRegexId: string | null = null;
   titleRegexEditDraft = '';
@@ -579,6 +581,8 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         titleRegex: tr,
         skipSubscriberOnly: this.skipSubscriberOnly,
         liveCategories: [...this.liveCategories],
+        liveStopAfterMinutes: this.liveStopAfterMinutes,
+        liveRecheckMinutes: this.liveRecheckMinutes,
       })
       .pipe(
         takeUntilDestroyed(this.destroyRef),

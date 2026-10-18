@@ -167,6 +167,10 @@ _MP_CTX = (
 # Grace period between SIGINT (lets yt-dlp/ffmpeg finalize the partial file,
 # e.g. when cancelling a livestream) and SIGKILL escalation.
 _CANCEL_GRACE_SECONDS = 15
+# How long a gracefully stopped live recording may take to finalize (finish
+# the last fragments, then post-process a possibly hours-long file) before
+# being killed.
+_STOP_GRACE_SECONDS = 1800
 
 _LIVE_CHECK_INTERVAL = 60
 _LIVE_MAX_CHECK_INTERVAL = 3600
@@ -793,6 +797,8 @@ class Download:
         if "impersonate" in self.ytdl_opts:
             self.ytdl_opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(self.ytdl_opts["impersonate"])
         self.canceled = False
+        # stop(): a live recording ended early on purpose; the file is kept.
+        self.stopping = False
         self.tmpfilename = None
         self.status_queue = None
         self.proc = None
@@ -1079,6 +1085,23 @@ class Download:
         self.canceled = True
         if self.status_queue is not None:
             self.status_queue.put(None)
+
+    def stop(self):
+        """End a live recording early and keep what was recorded.
+
+        yt-dlp treats SIGINT during a live download as "stop here": it stops
+        fetching fragments, finalizes the file and still runs postprocessing,
+        then exits normally. Unlike cancel() the download stays in the queue
+        until then and lands in the done list.
+        """
+        if not self.running() or self.stopping:
+            return False
+        log.info(f"Stopping live recording: {self.info.title}")
+        self.stopping = True
+        interrupted = self._signal_group(signal.SIGINT)
+        if interrupted and self.loop is not None:
+            self.loop.call_later(_STOP_GRACE_SECONDS, self._kill_if_alive)
+        return interrupted
 
     def close(self):
         log.info(f"Closing download process for: {self.info.title}")
@@ -1602,7 +1625,19 @@ class DownloadQueue:
             await self._post_download_cleanup(download)
 
     async def _post_download_cleanup(self, download):
-        if download.info.status != 'finished':
+        if download.info.status != 'finished' and download.stopping:
+            # The stop interrupted yt-dlp outside the fragment loop, so it
+            # couldn't finalize. Keep the partial recording rather than
+            # deleting it.
+            download.info.status = 'error'
+            kept = download.tmpfilename if download.tmpfilename and os.path.isfile(download.tmpfilename) else None
+            download.info.msg = (
+                f'Recording stopped before yt-dlp could finalize it; the partial file was kept: {kept}'
+                if kept else 'Recording stopped before yt-dlp could finalize it'
+            )
+            download.info.error = download.info.msg
+            download.info.filename = None
+        elif download.info.status != 'finished':
             if download.tmpfilename and os.path.isfile(download.tmpfilename):
                 try:
                     os.remove(download.tmpfilename)
@@ -2286,6 +2321,20 @@ class DownloadQueue:
             sponsorblock=sponsorblock,
             audio_tags=audio_tags,
         )
+
+    def live_capture_state(self, url):
+        """'active', 'stopping' (finalizing after stop_live_capture) or 'none'."""
+        if self.queue.exists(url):
+            return 'stopping' if getattr(self.queue.get(url), 'stopping', False) else 'active'
+        if self.pending.exists(url):
+            return 'active'
+        return 'none'
+
+    def stop_live_capture(self, url):
+        """Gracefully end a running live recording, keeping the file. True if stopped."""
+        if not self.queue.exists(url):
+            return False
+        return bool(self.queue.get(url).stop())
 
     def live_capture_failed(self, url, entry_id):
         """True when the last capture of stream ``entry_id`` from ``url`` ended in error.

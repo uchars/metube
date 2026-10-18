@@ -744,8 +744,14 @@ describe('App', () => {
     app.addUrl = 'https://www.twitch.tv/someone';
     app.liveCategories = ['Chess', 'Just Chatting'];
     app.addSubscription();
-    const payload = subs.subscribeCalls[0] as { liveCategories: string[] };
+    const payload = subs.subscribeCalls[0] as {
+      liveCategories: string[];
+      liveStopAfterMinutes: number;
+      liveRecheckMinutes: number;
+    };
     expect(payload.liveCategories).toEqual(['Chess', 'Just Chatting']);
+    expect(payload.liveStopAfterMinutes).toBe(10);
+    expect(payload.liveRecheckMinutes).toBe(5);
     expect(app.liveCategories).toEqual([]);
   });
 

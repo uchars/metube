@@ -2151,3 +2151,156 @@ class TwitchCategoryExtractorTests(unittest.TestCase):
         self.assertEqual(info["categories"], ["Chess"])
         self.assertEqual(info["description"], "Ranked grind")
         self.assertTrue(info["is_live"])
+
+
+class _LiveQueue(_Queue):
+    """Fake queue that tracks recording state like DownloadQueue does."""
+
+    def __init__(self):
+        super().__init__()
+        self.state: dict[str, str] = {}
+        self.stopped: list[str] = []
+
+    async def add_entry(self, entry, *args, **kwargs):
+        result = await super().add_entry(entry, *args, **kwargs)
+        self.state[entry["webpage_url"]] = "active"
+        return result
+
+    def live_capture_state(self, url):
+        return self.state.get(url, "none")
+
+    def stop_live_capture(self, url):
+        if self.state.get(url) != "active":
+            return False
+        self.state[url] = "stopping"
+        self.stopped.append(url)
+        return True
+
+    def live_capture_failed(self, url, entry_id):
+        return False
+
+
+class LiveRecordingStopTests(unittest.IsolatedAsyncioTestCase):
+    URL = "https://www.twitch.tv/someone"
+
+    def _stream(self, category):
+        return {"id": "s1", "title": "t", "categories": [category], "url": self.URL, "uploader": "Someone"}
+
+    async def _setup(self, tmp, **extra):
+        queue = _LiveQueue()
+        mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+        result = await LiveSubscriptionTests._add_offline_live(self, mgr, live_categories=["Chess"], **extra)
+        return queue, mgr, result["subscription"]["id"]
+
+    async def _check(self, mgr, sub_id, category, at):
+        with patch("subscriptions.probe_live_channel", return_value=self._stream(category)), patch(
+            "subscriptions.time.time", return_value=at
+        ):
+            await mgr.check_now([sub_id])
+
+    async def test_recording_stops_after_ten_minutes_off_category_and_restarts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp)
+            self.assertEqual(mgr.get(sub_id).live_stop_after_minutes, 10)
+            self.assertEqual(mgr.get(sub_id).live_recheck_minutes, 5)
+
+            await self._check(mgr, sub_id, "Chess", 1000)
+            self.assertEqual(len(queue.entries), 1)
+            self.assertTrue(mgr.get(sub_id).live_recording)
+
+            # Switched away: the timer starts, the recording keeps going.
+            await self._check(mgr, sub_id, "Just Chatting", 2000)
+            self.assertEqual(mgr.get(sub_id).live_mismatch_since, 2000)
+            await self._check(mgr, sub_id, "Just Chatting", 2000 + 9 * 60)
+            self.assertEqual(queue.stopped, [])
+
+            # Ten minutes off-category: stopped, and the stream id forgotten.
+            await self._check(mgr, sub_id, "Just Chatting", 2000 + 10 * 60)
+            self.assertEqual(queue.stopped, [self.URL])
+            sub = mgr.get(sub_id)
+            self.assertNotIn("s1", sub.seen_ids)
+            self.assertIsNone(sub.live_mismatch_since)
+            self.assertTrue(sub.live_recording)
+
+            # Back on category while the old recording still finalizes: wait.
+            await self._check(mgr, sub_id, "Chess", 3000)
+            self.assertEqual(len(queue.entries), 1)
+
+            # Once it has finished, a new recording starts.
+            queue.state[self.URL] = "none"
+            await self._check(mgr, sub_id, "Chess", 3300)
+            self.assertEqual(len(queue.entries), 2)
+            self.assertIn("s1", mgr.get(sub_id).seen_ids)
+
+    async def test_returning_to_the_category_resets_the_timer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp)
+            await self._check(mgr, sub_id, "Chess", 1000)
+            await self._check(mgr, sub_id, "Art", 2000)
+            await self._check(mgr, sub_id, "Chess", 2300)
+            self.assertIsNone(mgr.get(sub_id).live_mismatch_since)
+            await self._check(mgr, sub_id, "Art", 2600)
+            await self._check(mgr, sub_id, "Art", 2600 + 9 * 60)
+            self.assertEqual(queue.stopped, [])
+            self.assertEqual(len(queue.entries), 1)
+
+    async def test_zero_never_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp, live_stop_after_minutes=0)
+            await self._check(mgr, sub_id, "Chess", 1000)
+            await self._check(mgr, sub_id, "Art", 2000)
+            await self._check(mgr, sub_id, "Art", 2000 + 3600)
+            self.assertEqual(queue.stopped, [])
+            self.assertIsNone(mgr.get(sub_id).live_mismatch_since)
+
+    async def test_timer_only_runs_while_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp)
+            await self._check(mgr, sub_id, "Art", 1000)
+            self.assertIsNone(mgr.get(sub_id).live_mismatch_since)
+            self.assertFalse(mgr.get(sub_id).live_recording)
+
+    async def test_failed_probe_keeps_the_timer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp)
+            await self._check(mgr, sub_id, "Chess", 1000)
+            await self._check(mgr, sub_id, "Art", 2000)
+            err = subscriptions.yt_dlp.utils.YoutubeDLError("blip")
+            with patch("subscriptions.probe_live_channel", side_effect=err):
+                await mgr.check_now([sub_id])
+            sub = mgr.get(sub_id)
+            self.assertEqual(sub.live_mismatch_since, 2000)
+            self.assertTrue(sub.live_recording)
+
+    async def test_recording_subscriptions_use_the_recheck_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, mgr, sub_id = await self._setup(tmp)
+            sub = mgr.get(sub_id)
+            sub.check_interval_minutes = 30
+            sub.last_checked = time.time() - 6 * 60
+            checked: list[str] = []
+
+            async def fake_check(s):
+                checked.append(s.id)
+
+            with patch.object(mgr, "_check_one_unlocked", side_effect=fake_check):
+                await mgr.run_due_checks()
+                self.assertEqual(checked, [])
+                sub.live_recording = True
+                await mgr.run_due_checks()
+            self.assertEqual(checked, [sub_id])
+
+    async def test_minutes_are_validated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _LiveQueue(), _Notifier())
+            bad = await mgr.add_subscription(
+                self.URL, **_ADD_KWARGS, live_recheck_minutes=0
+            )
+            self.assertEqual(bad["status"], "error")
+            _, mgr, sub_id = await self._setup(tmp)
+            res = await mgr.update_subscription(sub_id, {"live_stop_after_minutes": "15", "live_recheck_minutes": 2})
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(mgr.get(sub_id).live_stop_after_minutes, 15)
+            self.assertEqual(mgr.get(sub_id).live_recheck_minutes, 2)
+            res = await mgr.update_subscription(sub_id, {"live_stop_after_minutes": -1})
+            self.assertEqual(res["status"], "error")

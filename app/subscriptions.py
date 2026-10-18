@@ -49,6 +49,14 @@ KIND_LIVE = "live"
 # broadcast to every connected client.
 LIVE_CATEGORIES_MAX = 50
 LIVE_CATEGORY_MAX_LENGTH = 100
+
+# A live recording is stopped (and kept) once the stream has stopped matching
+# the subscription's filters for this long; 0 never stops it.
+DEFAULT_LIVE_STOP_AFTER_MINUTES = 10
+# How often a live subscription is checked while one of its recordings runs.
+DEFAULT_LIVE_RECHECK_MINUTES = 5
+
+_KEEP = object()
 _MEDIA_HINT_FIELDS = (
     "duration",
     "timestamp",
@@ -467,6 +475,13 @@ class SubscriptionInfo:
     live_now: bool = False
     live_title: str = ""
     live_category: str = ""
+    live_stop_after_minutes: int = DEFAULT_LIVE_STOP_AFTER_MINUTES
+    live_recheck_minutes: int = DEFAULT_LIVE_RECHECK_MINUTES
+    # When the running recording's stream was first seen not matching.
+    live_mismatch_since: Optional[float] = None
+    # The URL of this subscription's current recording in the download queue.
+    live_capture_url: str = ""
+    live_recording: bool = False
     last_checked: Optional[float] = None
     seen_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
@@ -496,6 +511,10 @@ class SubscriptionInfo:
             "live_now": self.live_now,
             "live_title": self.live_title,
             "live_category": self.live_category,
+            "live_stop_after_minutes": self.live_stop_after_minutes,
+            "live_recheck_minutes": self.live_recheck_minutes,
+            "live_mismatch_since": self.live_mismatch_since,
+            "live_recording": self.live_recording,
             "last_checked": self.last_checked,
             "seen_count": len(self.seen_ids),
             "error": self.error,
@@ -534,6 +553,11 @@ def _subscription_to_record(sub: SubscriptionInfo) -> dict[str, Any]:
         "live_now": sub.live_now,
         "live_title": sub.live_title,
         "live_category": sub.live_category,
+        "live_stop_after_minutes": sub.live_stop_after_minutes,
+        "live_recheck_minutes": sub.live_recheck_minutes,
+        "live_mismatch_since": sub.live_mismatch_since,
+        "live_capture_url": sub.live_capture_url,
+        "live_recording": sub.live_recording,
         "last_checked": sub.last_checked,
         "seen_ids": list(sub.seen_ids),
         "error": sub.error,
@@ -622,6 +646,21 @@ def validate_live_categories(value: Any) -> list[str]:
     if len(out) > LIVE_CATEGORIES_MAX:
         raise ValueError(f"at most {LIVE_CATEGORIES_MAX} live categories are allowed")
     return out
+
+
+def validate_minutes(value: Any, *, field_name: str, minimum: int, default: int) -> int:
+    """Parse a whole number of minutes, or raise ValueError."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be an integer") from None
+    if minutes < minimum:
+        raise ValueError(f"{field_name} must be at least {minimum}")
+    return minutes
 
 
 # The name is a display label the user picks; it is persisted and broadcast to
@@ -879,7 +918,12 @@ class SubscriptionManager:
             for sub in list(self._subs.values()):
                 if not sub.enabled:
                     continue
-                interval_sec = max(60, int(sub.check_interval_minutes) * 60)
+                interval_min = int(sub.check_interval_minutes)
+                if sub.kind == KIND_LIVE and sub.live_recording:
+                    # Recording: check often enough to notice the stream
+                    # leaving the subscribed categories.
+                    interval_min = min(interval_min, int(sub.live_recheck_minutes))
+                interval_sec = max(60, interval_min * 60)
                 if sub.last_checked is None:
                     due.append(sub)
                     continue
@@ -937,12 +981,22 @@ class SubscriptionManager:
         clip_start: Optional[float] = None,
         clip_end: Optional[float] = None,
         live_categories: Any = None,
+        live_stop_after_minutes: Any = None,
+        live_recheck_minutes: Any = None,
     ) -> dict:
         url = self._normalize_url(url)
         if not url:
             return {"status": "error", "msg": "Missing URL"}
         try:
             live_categories_stored = validate_live_categories(live_categories)
+            stop_after = validate_minutes(
+                live_stop_after_minutes, field_name="live_stop_after_minutes",
+                minimum=0, default=DEFAULT_LIVE_STOP_AFTER_MINUTES,
+            )
+            recheck = validate_minutes(
+                live_recheck_minutes, field_name="live_recheck_minutes",
+                minimum=1, default=DEFAULT_LIVE_RECHECK_MINUTES,
+            )
         except ValueError as exc:
             return {"status": "error", "msg": str(exc)}
         # SSRF guard: block non-http(s) schemes and internal/metadata hosts
@@ -1078,6 +1132,8 @@ class SubscriptionManager:
                 clip_end=clip_end,
                 kind=kind,
                 live_categories=live_categories_stored,
+                live_stop_after_minutes=stop_after,
+                live_recheck_minutes=recheck,
                 last_checked=last_checked,
                 seen_ids=list(dict.fromkeys(all_ids)),
                 error=None,
@@ -1168,6 +1224,19 @@ class SubscriptionManager:
             except ValueError as exc:
                 return {"status": "error", "msg": str(exc)}
 
+        validated_minutes: dict[str, int] = {}
+        for name, minimum, default in (
+            ("live_stop_after_minutes", 0, DEFAULT_LIVE_STOP_AFTER_MINUTES),
+            ("live_recheck_minutes", 1, DEFAULT_LIVE_RECHECK_MINUTES),
+        ):
+            if name in changes:
+                try:
+                    validated_minutes[name] = validate_minutes(
+                        changes[name], field_name=name, minimum=minimum, default=default
+                    )
+                except ValueError as exc:
+                    return {"status": "error", "msg": str(exc)}
+
         enabled_set = False
         validated_enabled = False
         if "enabled" in changes:
@@ -1209,6 +1278,8 @@ class SubscriptionManager:
                 sub.skip_subscriber_only = validated_skip_so
             if validated_categories is not None:
                 sub.live_categories = validated_categories
+            for name, minutes in validated_minutes.items():
+                setattr(sub, name, minutes)
 
             try:
                 self._save_locked()
@@ -1453,12 +1524,22 @@ class SubscriptionManager:
             sub = cur
         await self.notifier.subscription_updated(sub)
 
-    async def _check_live_inner(self, sub: SubscriptionInfo) -> None:
-        """Check a live subscription: capture the stream if live and matching.
+    def _live_capture_state(self, url: str) -> str:
+        state_fn = getattr(self.dqueue, "live_capture_state", None)
+        if not url or not callable(state_fn):
+            return "none"
+        return state_fn(url)
 
-        Each stream is captured once (its id goes into seen_ids). A stream is
-        captured again only when its capture failed while the channel is still
-        live — a dropped connection — so a cancelled capture stays cancelled.
+    async def _check_live_inner(self, sub: SubscriptionInfo) -> None:
+        """Check a live subscription: record the stream while it matches.
+
+        Each stream is recorded once (its id goes into seen_ids). It is
+        recorded again when its recording failed while the channel is still
+        live — a dropped connection — but a cancelled recording stays
+        cancelled. While a recording runs, a stream that stops matching the
+        filters for live_stop_after_minutes gets its recording stopped (the
+        file is kept) and its id forgotten, so it is recorded afresh if it
+        matches again.
         """
         sid = sub.id
         scan_extra_opts = self._scan_extra_opts(sub.ytdl_options_presets, sub.ytdl_options_overrides)
@@ -1470,12 +1551,12 @@ class SubscriptionManager:
             )
         except yt_dlp.utils.YoutubeDLError as exc:
             log.warning("Live subscription check failed for %s: %s", sub.name, exc)
-            await self._finish_live_check(sid, live_now=False, error=str(exc))
-            return
-
-        if stream is None:
-            log.info("Live subscription check finished for %s: offline", sub.name)
-            await self._finish_live_check(sid, live_now=False)
+            # A failed probe says nothing about the stream: keep the mismatch
+            # timer and the recording state as they were.
+            await self._finish_live_check(
+                sid, live_now=False, error=str(exc), mismatch_since=_KEEP,
+                capture_state=self._live_capture_state(sub.live_capture_url),
+            )
             return
 
         async with self._lock:
@@ -1485,7 +1566,16 @@ class SubscriptionManager:
             categories = list(cur.live_categories)
             title_regex = cur.title_regex or ""
             seen = cur.seen_set()
+            mismatch_since = cur.live_mismatch_since
+            stop_after_sec = max(0, int(cur.live_stop_after_minutes)) * 60
+            capture_url = cur.live_capture_url
             opts = copy.deepcopy(cur)
+        capture_state = self._live_capture_state(capture_url)
+
+        if stream is None:
+            log.info("Live subscription check finished for %s: offline", sub.name)
+            await self._finish_live_check(sid, live_now=False, capture_state=capture_state)
+            return
 
         pattern_re: Optional[re.Pattern[str]] = None
         if title_regex:
@@ -1495,28 +1585,56 @@ class SubscriptionManager:
                 log.warning("Invalid stored title_regex on subscription %s, ignoring filter", sub.name)
 
         live_category = ", ".join(stream["categories"])
+        stream_id = stream["id"]
+        stream_url = stream["url"] or sub.url
         matches, match_error = live_stream_matches(stream, categories, pattern_re)
         if not matches:
+            now = time.time()
+            forget_id = None
+            if capture_state != "active" or not stop_after_sec:
+                mismatch_since = None
+            else:
+                mismatch_since = mismatch_since or now
+                if now - mismatch_since >= stop_after_sec:
+                    stop_fn = getattr(self.dqueue, "stop_live_capture", None)
+                    if callable(stop_fn) and stop_fn(capture_url):
+                        log.info(
+                            "Stopping recording for %s: the stream has not matched the filters for %d min",
+                            sub.name, stop_after_sec // 60,
+                        )
+                        capture_state = "stopping"
+                        forget_id = stream_id
+                    mismatch_since = None
             log.info(
                 "Live subscription check finished for %s: live, filters do not match (title=%r, categories=%r)",
                 sub.name, stream["title"], stream["categories"],
             )
             await self._finish_live_check(
                 sid, live_now=True, title=stream["title"], category=live_category, error=match_error,
+                mismatch_since=mismatch_since, capture_state=capture_state, forget_id=forget_id,
             )
             return
 
-        stream_id = stream["id"]
-        stream_url = stream["url"] or sub.url
         if stream_id in seen:
             capture_failed = getattr(self.dqueue, "live_capture_failed", None)
             if not (callable(capture_failed) and capture_failed(stream_url, stream_id)):
-                log.info("Live subscription check finished for %s: stream already captured", sub.name)
+                log.info("Live subscription check finished for %s: stream already recorded", sub.name)
                 await self._finish_live_check(
                     sid, live_now=True, title=stream["title"], category=live_category,
+                    mismatch_since=None, capture_state=capture_state,
                 )
                 return
-            log.info("Live capture for %s failed while still live; capturing again", sub.name)
+            log.info("Live recording for %s failed while still live; recording again", sub.name)
+
+        if self._live_capture_state(stream_url) == "stopping":
+            # The previous recording is still finalizing; queueing now would
+            # be deduplicated against it. Start the new one on the next check.
+            log.info("Live subscription check finished for %s: waiting for the stopped recording to finish", sub.name)
+            await self._finish_live_check(
+                sid, live_now=True, title=stream["title"], category=live_category,
+                mismatch_since=None, capture_state="stopping",
+            )
+            return
 
         title_parts = [p for p in (stream.get("uploader"), stream["title"]) if p]
         entry = {
@@ -1549,7 +1667,7 @@ class SubscriptionManager:
         log.info(
             "Live subscription check finished for %s: live, %s",
             sub.name,
-            "capture queued" if queued_ids else "queueing failed",
+            "recording queued" if queued_ids else "queueing failed",
         )
         await self._finish_live_check(
             sid,
@@ -1558,6 +1676,9 @@ class SubscriptionManager:
             category=live_category,
             error="; ".join(queue_errors[:3]) if queue_errors else None,
             captured_id=queued_ids[0] if queued_ids else None,
+            capture_url=stream_url if queued_ids else _KEEP,
+            capture_state="active" if queued_ids else capture_state,
+            mismatch_since=None,
         )
 
     async def _finish_live_check(
@@ -1569,6 +1690,10 @@ class SubscriptionManager:
         category: str = "",
         error: Optional[str] = None,
         captured_id: Optional[str] = None,
+        forget_id: Optional[str] = None,
+        mismatch_since: Any = None,
+        capture_url: Any = _KEEP,
+        capture_state: str = "none",
     ) -> None:
         async with self._lock:
             cur = self._subs.get(sid)
@@ -1580,8 +1705,18 @@ class SubscriptionManager:
             cur.live_category = category
             cur.error = error
             cur.last_checked = time.time()
+            if mismatch_since is not _KEEP:
+                cur.live_mismatch_since = mismatch_since
+            if capture_url is not _KEEP:
+                cur.live_capture_url = capture_url
+            cur.live_recording = capture_state != "none"
+            seen_ids = list(cur.seen_ids)
+            if forget_id is not None:
+                seen_ids = [i for i in seen_ids if i != forget_id]
             if captured_id is not None:
-                cur.seen_ids = self._normalize_seen_ids([captured_id] + list(cur.seen_ids))
+                seen_ids = [captured_id] + seen_ids
+            if forget_id is not None or captured_id is not None:
+                cur.seen_ids = self._normalize_seen_ids(seen_ids)
             try:
                 self._save_locked()
             except Exception:

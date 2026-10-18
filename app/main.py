@@ -1145,6 +1145,8 @@ async def subscribe(request):
         clip_start=sub_clip_start,
         clip_end=sub_clip_end,
         live_categories=post.get('live_categories'),
+        live_stop_after_minutes=post.get('live_stop_after_minutes'),
+        live_recheck_minutes=post.get('live_recheck_minutes'),
     )
     return web.Response(text=serializer.encode(result))
 
@@ -1205,6 +1207,7 @@ async def subscriptions_update(request):
         and k in (
             'enabled', 'check_interval_minutes', 'name', 'folder', 'title_regex',
             'skip_subscriber_only', 'live_categories',
+            'live_stop_after_minutes', 'live_recheck_minutes',
         )
     }
     if not changes:

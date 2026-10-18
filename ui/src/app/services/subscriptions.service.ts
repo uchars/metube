@@ -13,6 +13,8 @@ export interface SubscribePayload extends AddDownloadPayload {
   titleRegex: string;
   skipSubscriberOnly: boolean;
   liveCategories: string[];
+  liveStopAfterMinutes: number;
+  liveRecheckMinutes: number;
 }
 
 @Injectable({
@@ -104,6 +106,8 @@ export class SubscriptionsService {
       title_regex: payload.titleRegex,
       skip_subscriber_only: payload.skipSubscriberOnly,
       live_categories: payload.liveCategories,
+      live_stop_after_minutes: payload.liveStopAfterMinutes,
+      live_recheck_minutes: payload.liveRecheckMinutes,
     };
     // Send the clip fields only when actually filled in. The backend treats an
     // absent field as "not requested", which is what stops a t= timestamp on the
@@ -130,6 +134,8 @@ export class SubscriptionsService {
         | 'title_regex'
         | 'skip_subscriber_only'
         | 'live_categories'
+        | 'live_stop_after_minutes'
+        | 'live_recheck_minutes'
       >
     >,
   ) {
