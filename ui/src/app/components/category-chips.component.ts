@@ -41,7 +41,8 @@ import { CategoryPlatform, StreamCategoriesService } from '../services/stream-ca
       padding: 0.1rem 0.45rem 0.1rem 0.1rem;
       border: 1px solid var(--bs-border-color);
       border-radius: 0.375rem;
-      background: var(--bs-body-bg);
+      background: var(--bs-tertiary-bg);
+      color: var(--bs-body-color);
       font-size: 0.8rem;
     }
     img,

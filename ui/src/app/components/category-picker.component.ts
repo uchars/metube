@@ -64,11 +64,11 @@ interface SearchRequest {
     @if (!isOpen && categories().length) {
       <div class="d-flex flex-wrap gap-1 mt-1">
         @for (name of categories(); track name) {
-          <span class="badge rounded-pill text-bg-light border d-inline-flex align-items-center gap-1">
+          <span class="picker-chip">
             @if (thumbnail(name); as art) {
               <img [src]="art" alt="" class="picker-chip-art" loading="lazy" />
             }
-            {{ label(name) }}
+            <span class="text-break">{{ label(name) }}</span>
             <button
               type="button"
               class="btn-close picker-chip-remove"
@@ -209,11 +209,23 @@ interface SearchRequest {
       font-size: 0.875rem;
       color: var(--bs-secondary-color);
     }
+    .picker-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.15rem 0.4rem 0.15rem 0.15rem;
+      border: 1px solid var(--bs-border-color);
+      border-radius: 999px;
+      background: var(--bs-tertiary-bg);
+      color: var(--bs-body-color);
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
     .picker-chip-art {
-      width: 0.9rem;
-      height: 1.2rem;
+      width: 1.1rem;
+      height: 1.45rem;
       object-fit: cover;
-      border-radius: 0.1rem;
+      border-radius: 0.2rem;
     }
     .picker-chip-remove {
       width: 0.5em;
