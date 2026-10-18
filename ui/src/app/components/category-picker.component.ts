@@ -17,9 +17,11 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Subject, debounceTime, distinctUntilChanged, switchMap, tap } from 'rxjs';
 import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
 import { faMagnifyingGlass, faPlus, faXmark } from '@fortawesome/free-solid-svg-icons';
-import { TwitchCategoriesService, TwitchCategory } from '../services/twitch-categories.service';
-
-const key = (name: string) => name.trim().toLocaleLowerCase();
+import {
+  TwitchCategoriesService,
+  TwitchCategory,
+  categoryKey as key,
+} from '../services/twitch-categories.service';
 
 /**
  * Search box for picking the stream categories a live subscription records.
@@ -225,19 +227,19 @@ export class CategoryPickerComponent implements OnInit {
   loading = false;
   error = '';
 
-  /** Known Twitch details by lower-cased name, from searches and lookups. */
-  private known = new Map<string, TwitchCategory>();
-  private lookedUp = new Set<string>();
   private query$ = new Subject<string>();
 
   constructor() {
     effect(() => {
       const names = this.categories();
-      untracked(() => this.lookupThumbnails(names));
+      untracked(() => this.svc.ensure(names));
     });
   }
 
   ngOnInit() {
+    this.svc.changed
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => this.cdr.markForCheck());
     this.query$
       .pipe(
         debounceTime(250),
@@ -254,9 +256,7 @@ export class CategoryPickerComponent implements OnInit {
         this.loading = false;
         this.error = res.error ?? '';
         this.results = res.categories;
-        for (const cat of res.categories) {
-          this.known.set(key(cat.name), cat);
-        }
+        this.svc.remember(res.categories);
         this.cdr.markForCheck();
       });
   }
@@ -343,11 +343,11 @@ export class CategoryPickerComponent implements OnInit {
   }
 
   thumbnail(name: string): string | null {
-    return this.known.get(key(name))?.box_art_url ?? null;
+    return this.svc.get(name)?.box_art_url ?? null;
   }
 
   label(name: string): string {
-    return this.known.get(key(name))?.display_name ?? name;
+    return this.svc.get(name)?.display_name ?? name;
   }
 
   viewerLabel(viewers: number): string {
@@ -358,24 +358,5 @@ export class CategoryPickerComponent implements OnInit {
       return `${(viewers / 1_000).toFixed(1)}K viewers`;
     }
     return `${viewers} viewers`;
-  }
-
-  private lookupThumbnails(names: string[]) {
-    const missing = names.filter((n) => !this.known.has(key(n)) && !this.lookedUp.has(key(n)));
-    if (!missing.length) {
-      return;
-    }
-    for (const n of missing) {
-      this.lookedUp.add(key(n));
-    }
-    this.svc
-      .lookup(missing)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((res) => {
-        for (const cat of res.categories) {
-          this.known.set(key(cat.name), cat);
-        }
-        this.cdr.markForCheck();
-      });
   }
 }

@@ -1047,7 +1047,12 @@
                     </div>
                   } @else {
                     <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
-                      <span class="text-muted small text-break">Categories: {{ entry[1].live_categories?.length ? entry[1].live_categories!.join(', ') : 'any' }}</span>
+                      <span class="text-muted small">Categories:</span>
+                      @if (entry[1].live_categories?.length) {
+                        <app-category-chips [names]="entry[1].live_categories!" />
+                      } @else {
+                        <span class="text-muted small">any</span>
+                      }
                       <button type="button" class="btn btn-link btn-sm p-0"
                         (click)="beginEditLiveCategories(entry[0], entry[1].live_categories)"
                         [disabled]="downloads.loading"

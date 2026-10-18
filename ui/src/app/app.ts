@@ -35,6 +35,7 @@ import {
   ToastContainerComponent,
   PlaylistBrowserComponent,
   CategoryPickerComponent,
+  CategoryChipsComponent,
 } from './components/';
 
 @Component({
@@ -54,6 +55,7 @@ import {
         SelectAllCheckboxComponent,
         ItemCheckboxComponent,
         CategoryPickerComponent,
+        CategoryChipsComponent,
         ToastContainerComponent,
   ],
   templateUrl: './app.html',

@@ -3,3 +3,4 @@ export { ItemCheckboxComponent } from './slave-checkbox.component';
 export { ToastContainerComponent } from './toast-container.component';
 export { PlaylistBrowserComponent } from './playlist-browser.component';
 export { CategoryPickerComponent } from './category-picker.component';
+export { CategoryChipsComponent } from './category-chips.component';

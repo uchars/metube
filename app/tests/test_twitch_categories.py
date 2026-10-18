@@ -57,6 +57,13 @@ class TwitchCategoryTests(unittest.TestCase):
         self.assertEqual([c["box_art_url"] for c in result][:3], [None, None, None])
         self.assertTrue(result[3]["box_art_url"].startswith("https://static-cdn.jtvnw.net/"))
 
+    def test_box_art_size_template_is_filled_in(self):
+        art = "https://static-cdn.jtvnw.net/ttv-boxart/1-{width}x{height}.jpg"
+        data = {"searchCategories": {"edges": [{"node": _node("A", art=art)}]}}
+        with patch("twitch_categories._gql", return_value=data):
+            result = tc.search_categories_sync(_cfg(), "a")
+        self.assertEqual(result[0]["box_art_url"], "https://static-cdn.jtvnw.net/ttv-boxart/1-52x72.jpg")
+
     def test_lookup_batches_uncached_names_and_omits_unknown_ones(self):
         tc._cache_put(("game", "chess"), {"name": "Chess", "display_name": "Chess",
                                          "box_art_url": None, "viewers": None})

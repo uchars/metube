@@ -78,6 +78,8 @@ def _safe_box_art_url(value: Any) -> Optional[str]:
     """Only https URLs on Twitch's CDN reach the browser as an <img> source."""
     if not isinstance(value, str):
         return None
+    # Box art URLs can come back as a size template.
+    value = value.replace("{width}", "52").replace("{height}", "72")
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (host == "jtvnw.net" or host.endswith(".jtvnw.net")):

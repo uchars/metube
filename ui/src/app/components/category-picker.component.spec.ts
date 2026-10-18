@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { Subject, of } from 'rxjs';
 import { CategoryPickerComponent } from './category-picker.component';
 import { TwitchCategoriesService, TwitchCategory } from '../services/twitch-categories.service';
 
@@ -20,9 +20,26 @@ class TwitchCategoriesServiceStub {
     return of({ categories: this.results });
   }
 
-  lookup(names: string[]) {
+  changed = new Subject<void>();
+  private known = new Map<string, TwitchCategory>();
+
+  get(name: string) {
+    return this.known.get(name.toLocaleLowerCase()) ?? null;
+  }
+
+  remember(cats: TwitchCategory[]) {
+    for (const c of cats) {
+      this.known.set(c.name.toLocaleLowerCase(), c);
+    }
+  }
+
+  ensure(names: string[]) {
+    if (!names.length) {
+      return;
+    }
     this.lookupCalls.push(names);
-    return of({ categories: names.filter((n) => n !== 'Custom').map(cat) });
+    this.remember(names.filter((n) => n !== 'Custom').map(cat));
+    this.changed.next();
   }
 }
 
