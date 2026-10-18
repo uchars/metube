@@ -9,6 +9,9 @@ on:
 
 jobs:
   quality-checks:
+    # Publishing needs the upstream Docker Hub secrets; forks build and
+    # publish their own image with ghcr-image.yml instead.
+    if: github.repository == 'alexta69/metube'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
