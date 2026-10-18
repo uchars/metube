@@ -22,7 +22,7 @@ from watchfiles import DefaultFilter, Change, awatch
 
 import bg_tasks
 import format_catalog
-import twitch_categories
+import stream_categories
 from ytdl import DownloadQueueNotifier, DownloadQueue, Download
 from subscriptions import SubscriptionManager, SubscriptionNotifier, SubscriptionInfo, browse_playlist, coerce_optional_bool
 from yt_dlp.version import __version__ as yt_dlp_version
@@ -1149,31 +1149,40 @@ async def subscribe(request):
     return web.Response(text=serializer.encode(result))
 
 
-@routes.get(config.URL_PREFIX + 'twitch/categories')
-async def twitch_categories_search(request):
+def _category_platform(request) -> str:
+    platform = request.match_info['platform']
+    if platform not in stream_categories.PLATFORMS:
+        raise web.HTTPNotFound(reason='unknown category platform')
+    return platform
+
+
+@routes.get(config.URL_PREFIX + 'categories/{platform}')
+async def stream_categories_search(request):
+    platform = _category_platform(request)
     query = request.query.get('q', '')
-    if len(query) > twitch_categories.QUERY_MAX_LENGTH:
+    if len(query) > stream_categories.QUERY_MAX_LENGTH:
         raise web.HTTPBadRequest(reason='q is too long')
     try:
-        result = await twitch_categories.search_categories(config, query)
-    except twitch_categories.TwitchCategoryError as exc:
+        result = await stream_categories.search_categories(config, platform, query)
+    except stream_categories.StreamCategoryError as exc:
         return web.Response(text=serializer.encode({'status': 'error', 'msg': str(exc)}))
     return web.Response(text=serializer.encode({'status': 'ok', 'categories': result}))
 
 
-@routes.post(config.URL_PREFIX + 'twitch/categories/lookup')
-async def twitch_categories_lookup(request):
+@routes.post(config.URL_PREFIX + 'categories/{platform}/lookup')
+async def stream_categories_lookup(request):
+    platform = _category_platform(request)
     post = await _read_json_request(request)
     names = post.get('names')
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise web.HTTPBadRequest(reason='names must be a list of strings')
-    if len(names) > twitch_categories.LOOKUP_MAX_NAMES or any(
-        len(n) > twitch_categories.QUERY_MAX_LENGTH for n in names
+    if len(names) > stream_categories.LOOKUP_MAX_NAMES or any(
+        len(n) > stream_categories.QUERY_MAX_LENGTH for n in names
     ):
         raise web.HTTPBadRequest(reason='too many or too long category names')
     try:
-        result = await twitch_categories.lookup_categories(config, names)
-    except twitch_categories.TwitchCategoryError as exc:
+        result = await stream_categories.lookup_categories(config, platform, names)
+    except stream_categories.StreamCategoryError as exc:
         return web.Response(text=serializer.encode({'status': 'error', 'msg': str(exc)}))
     return web.Response(text=serializer.encode({'status': 'ok', 'categories': result}))
 
@@ -1510,8 +1519,8 @@ app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/update', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/delete', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/check', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'twitch/categories', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'twitch/categories/lookup', add_cors)
+app.router.add_route('OPTIONS', config.URL_PREFIX + 'categories/{platform}', add_cors)
+app.router.add_route('OPTIONS', config.URL_PREFIX + 'categories/{platform}/lookup', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'upload-cookies', add_cors)
 app.router.add_route('OPTIONS', config.URL_PREFIX + 'delete-cookies', add_cors)
 

@@ -10,9 +10,9 @@ import {
   untracked,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { TwitchCategoriesService } from '../services/twitch-categories.service';
+import { CategoryPlatform, StreamCategoriesService } from '../services/stream-categories.service';
 
-/** Read-only list of category names with their Twitch box art, where known. */
+/** Read-only list of category names with their Twitch/Kick thumbnails, where known. */
 @Component({
   selector: 'app-category-chips',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -58,16 +58,19 @@ import { TwitchCategoriesService } from '../services/twitch-categories.service';
   `,
 })
 export class CategoryChipsComponent implements OnInit {
-  private svc = inject(TwitchCategoriesService);
+  private svc = inject(StreamCategoriesService);
   private cdr = inject(ChangeDetectorRef);
   private destroyRef = inject(DestroyRef);
 
   names = input<string[]>([]);
+  /** Whose thumbnails to show; null shows names only. */
+  platform = input<CategoryPlatform | null>(null);
 
   constructor() {
     effect(() => {
       const names = this.names();
-      untracked(() => this.svc.ensure(names));
+      const platform = this.platform();
+      untracked(() => this.svc.ensure(platform, names));
     });
   }
 
@@ -78,10 +81,10 @@ export class CategoryChipsComponent implements OnInit {
   }
 
   thumbnail(name: string): string | null {
-    return this.svc.get(name)?.box_art_url ?? null;
+    return this.svc.get(this.platform(), name)?.box_art_url ?? null;
   }
 
   label(name: string): string {
-    return this.svc.get(name)?.display_name ?? name;
+    return this.svc.get(this.platform(), name)?.display_name ?? name;
   }
 }

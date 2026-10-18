@@ -12,6 +12,7 @@ import { faGithub } from '@fortawesome/free-brands-svg-icons';
 import { CookieService } from 'ngx-cookie-service';
 import { AddDownloadPayload, DownloadsService } from './services/downloads.service';
 import { MeTubeSocket } from './services/metube-socket.service';
+import { CategoryPlatform, categoryPlatformForUrl } from './services/stream-categories.service';
 import { SubscriptionsService } from './services/subscriptions.service';
 import { ToastService } from './services/toast.service';
 import { BatchUrlsService, BatchUrlFilter } from './services/batch-urls.service';
@@ -631,6 +632,11 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       }
       this.cancelEditTitleRegex();
     });
+  }
+
+  /** Whose category list the picker browses for a subscription URL. */
+  categoryPlatform(url: string | null | undefined): CategoryPlatform | null {
+    return categoryPlatformForUrl(url);
   }
 
   beginEditLiveCategories(id: string, current: string[] | undefined) {

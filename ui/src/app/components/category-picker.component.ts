@@ -6,6 +6,7 @@ import {
   ElementRef,
   HostListener,
   OnInit,
+  computed,
   effect,
   inject,
   input,
@@ -14,21 +15,29 @@ import {
 } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { Subject, debounceTime, distinctUntilChanged, switchMap, tap } from 'rxjs';
+import { Subject, debounceTime, distinctUntilChanged, map, switchMap, tap } from 'rxjs';
 import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
 import { faMagnifyingGlass, faPlus, faXmark } from '@fortawesome/free-solid-svg-icons';
 import {
-  TwitchCategoriesService,
-  TwitchCategory,
+  CategoryPlatform,
+  PLATFORM_LABELS,
+  StreamCategoriesService,
+  StreamCategory,
   categoryKey as key,
-} from '../services/twitch-categories.service';
+} from '../services/stream-categories.service';
+
+interface SearchRequest {
+  platform: CategoryPlatform;
+  query: string;
+}
 
 /**
  * Search box for picking the stream categories a live subscription records.
  * Focusing it opens a panel: the selected categories first (each removable),
- * then Twitch's categories — the most-watched ones, or the search results —
- * with their box art. A typed name that Twitch doesn't know (e.g. a Kick
- * category) can still be added as is.
+ * then the platform's categories — the most-watched ones, or the search
+ * results — with their thumbnails. Which platform's list (Twitch or Kick)
+ * follows the subscription URL; for other sites only custom names can be
+ * added. A typed name the platform doesn't know can always be added as is.
  */
 @Component({
   selector: 'app-category-picker',
@@ -92,8 +101,15 @@ import {
             </div>
           }
         }
-        <div class="picker-heading">{{ query.trim() ? 'Twitch results' : 'Popular on Twitch' }}</div>
-        @if (loading) {
+        @if (platformLabel(); as site) {
+          <div class="picker-heading">{{ query.trim() ? site + ' results' : 'Popular on ' + site }}</div>
+        }
+        @if (!platform()) {
+          <div class="picker-note">
+            Enter a Twitch or Kick channel URL to browse its categories. You can still type a
+            category name to add it.
+          </div>
+        } @else if (loading) {
           <div class="picker-note">
             <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
             Loading…
@@ -207,7 +223,7 @@ import {
   `,
 })
 export class CategoryPickerComponent implements OnInit {
-  private svc = inject(TwitchCategoriesService);
+  private svc = inject(StreamCategoriesService);
   private cdr = inject(ChangeDetectorRef);
   private destroyRef = inject(DestroyRef);
   private host = inject(ElementRef<HTMLElement>);
@@ -215,7 +231,17 @@ export class CategoryPickerComponent implements OnInit {
   /** The selected category names, in the order they were added. */
   categories = model<string[]>([]);
   disabled = input(false);
-  placeholder = input('Search Twitch categories');
+  /** Whose category list to browse; null for sites without one. */
+  platform = input<CategoryPlatform | null>(null);
+
+  platformLabel = computed(() => {
+    const platform = this.platform();
+    return platform ? PLATFORM_LABELS[platform] : null;
+  });
+  placeholder = computed(() => {
+    const site = this.platformLabel();
+    return site ? `Search ${site} categories` : 'Type a category name';
+  });
 
   readonly faMagnifyingGlass = faMagnifyingGlass;
   readonly faPlus = faPlus;
@@ -223,16 +249,30 @@ export class CategoryPickerComponent implements OnInit {
 
   isOpen = false;
   query = '';
-  results: TwitchCategory[] = [];
+  results: StreamCategory[] = [];
   loading = false;
   error = '';
 
-  private query$ = new Subject<string>();
+  private search$ = new Subject<SearchRequest>();
 
   constructor() {
     effect(() => {
       const names = this.categories();
-      untracked(() => this.svc.ensure(names));
+      const platform = this.platform();
+      untracked(() => this.svc.ensure(platform, names));
+    });
+    // A different site (the URL was edited) has a different category list.
+    effect(() => {
+      this.platform();
+      untracked(() => {
+        this.results = [];
+        this.error = '';
+        this.loading = false;
+        if (this.isOpen) {
+          this.requestSearch();
+        }
+        this.cdr.markForCheck();
+      });
     });
   }
 
@@ -240,23 +280,28 @@ export class CategoryPickerComponent implements OnInit {
     this.svc.changed
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.cdr.markForCheck());
-    this.query$
+    this.search$
       .pipe(
         debounceTime(250),
-        distinctUntilChanged(),
+        distinctUntilChanged((a, b) => a.platform === b.platform && a.query === b.query),
         tap(() => {
           this.loading = true;
           this.error = '';
           this.cdr.markForCheck();
         }),
-        switchMap((q) => this.svc.search(q)),
+        switchMap((req) =>
+          this.svc.search(req.platform, req.query).pipe(map((res) => ({ req, res }))),
+        ),
         takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe((res) => {
+      .subscribe(({ req, res }) => {
         this.loading = false;
+        if (req.platform !== this.platform()) {
+          return;
+        }
         this.error = res.error ?? '';
         this.results = res.categories;
-        this.svc.remember(res.categories);
+        this.svc.remember(req.platform, res.categories);
         this.cdr.markForCheck();
       });
   }
@@ -273,7 +318,7 @@ export class CategoryPickerComponent implements OnInit {
       return;
     }
     this.isOpen = true;
-    this.query$.next(this.query.trim());
+    this.requestSearch();
     this.cdr.markForCheck();
   }
 
@@ -281,7 +326,7 @@ export class CategoryPickerComponent implements OnInit {
     this.isOpen = false;
     if (this.query) {
       this.query = '';
-      this.query$.next('');
+      this.requestSearch();
     }
     this.cdr.markForCheck();
   }
@@ -289,7 +334,7 @@ export class CategoryPickerComponent implements OnInit {
   onQuery(value: string) {
     this.query = value;
     this.isOpen = true;
-    this.query$.next(value.trim());
+    this.requestSearch();
     this.cdr.markForCheck();
   }
 
@@ -314,7 +359,7 @@ export class CategoryPickerComponent implements OnInit {
     }
     this.categories.set([...this.categories(), trimmed]);
     this.query = '';
-    this.query$.next('');
+    this.requestSearch();
     this.cdr.markForCheck();
   }
 
@@ -328,8 +373,15 @@ export class CategoryPickerComponent implements OnInit {
     return this.categories().some((c) => key(c) === k);
   }
 
-  /** Twitch categories not already selected. */
-  available(): TwitchCategory[] {
+  private requestSearch() {
+    const platform = this.platform();
+    if (platform) {
+      this.search$.next({ platform, query: this.query.trim() });
+    }
+  }
+
+  /** The platform's categories not already selected. */
+  available(): StreamCategory[] {
     return this.results.filter((cat) => !this.isSelected(cat.name));
   }
 
@@ -343,11 +395,11 @@ export class CategoryPickerComponent implements OnInit {
   }
 
   thumbnail(name: string): string | null {
-    return this.svc.get(name)?.box_art_url ?? null;
+    return this.svc.get(this.platform(), name)?.box_art_url ?? null;
   }
 
   label(name: string): string {
-    return this.svc.get(name)?.display_name ?? name;
+    return this.svc.get(this.platform(), name)?.display_name ?? name;
   }
 
   viewerLabel(viewers: number): string {

@@ -467,10 +467,11 @@
                 </div>
                 <div class="col-12">
                   <span class="form-label d-inline-block mb-1 help-title" tabindex="0" role="button"
-                    ngbPopover="Live channel subscriptions only (subscribe to a Twitch, Kick or YouTube /live channel URL): record a stream only while its category is one of these. Pick from Twitch's categories or add your own name (e.g. for Kick); case-insensitive; none = any category. Combined with the title filter, both must match."
+                    ngbPopover="Live channel subscriptions only (subscribe to a Twitch, Kick or YouTube /live channel URL): record a stream only while its category is one of these. For a Twitch or Kick URL, pick from that site's categories; for any site you can add your own name. Case-insensitive; none = any category. Combined with the title filter, both must match."
                     triggers="click" autoClose="outside" container="body">Live Stream Categories</span>
                   <app-category-picker
                     [(categories)]="liveCategories"
+                    [platform]="categoryPlatform(addUrl)"
                     [disabled]="addInProgress || subscribeInProgress || downloads.loading" />
                 </div>
                 <div class="col-12">
@@ -1037,6 +1038,7 @@
                     <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
                       <app-category-picker class="w-100"
                         [(categories)]="liveCategoriesEditDraft"
+                        [platform]="categoryPlatform(entry[1].url)"
                         [disabled]="downloads.loading" />
                       <button type="button" class="btn btn-sm btn-outline-secondary"
                         (click)="saveLiveCategories(entry[0])"
@@ -1049,7 +1051,7 @@
                     <div class="d-flex flex-wrap gap-1 align-items-center mt-1">
                       <span class="text-muted small">Categories:</span>
                       @if (entry[1].live_categories?.length) {
-                        <app-category-chips [names]="entry[1].live_categories!" />
+                        <app-category-chips [names]="entry[1].live_categories!" [platform]="categoryPlatform(entry[1].url)" />
                       } @else {
                         <span class="text-muted small">any</span>
                       }
